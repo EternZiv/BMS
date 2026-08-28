@@ -66,6 +66,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
     }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track: MediaStreamTrack) => track.stop());
+      streamRef.current = null;
     }
     setTorchSupported(false);
     setTorchOn(false);
@@ -128,7 +129,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
         }
         if ('zoom' in capabilities && capabilities.zoom) {
           const zoom = capabilities.zoom;
-          advanced.push({ zoom: Math.min(zoom.max, Math.max(zoom.min, Math.max(1.5, zoom.min))) });
+          advanced.push({ zoom: Math.min(zoom.max, Math.max(zoom.min, 2)) });
         }
         if (advanced.length > 0) await videoTrack.applyConstraints({ advanced });
       }
