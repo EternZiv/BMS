@@ -4,6 +4,7 @@
  */
 
 import React, { useState } from 'react';
+import { Analytics } from '@vercel/analytics/react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { AppProvider, useApp } from './context/AppContext';
 import { Header } from './components/common/Header';
@@ -144,6 +145,7 @@ const AppContent: React.FC = () => {
           ))}
         </div>
       )}
+      <Analytics />
     </div>
   );
 };
