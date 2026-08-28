@@ -61,25 +61,6 @@ export const ReleasedBatteryQrModal: React.FC<ReleasedBatteryQrModalProps> = ({ 
   if (!isOpen) return null;
 
   const modules: ModuleItem[] = Array.isArray(battery.modules) ? battery.modules : [];
-  const batteryPayload = JSON.stringify({
-    type: 'BATTERY',
-    battery: {
-      id: battery.id,
-      serialNumber: battery.serialNumber,
-      qrCode: battery.qrCode,
-    },
-    modules: modules.map(module => ({
-      id: module.id,
-      serialNumber: module.serialNumber,
-      qrCode: module.qrCode,
-      moduleIndex: module.moduleIndex,
-      cells: (module.cells || []).map(cell => ({
-        id: cell.id,
-        serialNumber: cell.internalSerial,
-        barcode: cell.supplierBarcode,
-      })),
-    })),
-  });
   const bms: BMSItem | undefined = battery.bms;
   const bmu: BMUItem | undefined = battery.bmu;
   const controller = bmu || bms;
@@ -107,27 +88,14 @@ export const ReleasedBatteryQrModal: React.FC<ReleasedBatteryQrModalProps> = ({ 
               title="Battery Pack"
               itemType="BATTERY"
               serialNumber={battery.serialNumber}
-              payload={batteryPayload}
+              payload={battery.serialNumber}
             />
             {controller && (
               <QrLabel
                 title={controllerType === 'BMU' ? 'Battery Management Unit' : 'Battery Management System'}
                 itemType={controllerType}
                 serialNumber={controller.serialNumber}
-                payload={JSON.stringify({
-                  type: controllerType,
-                  battery: {
-                    id: battery.id,
-                    serialNumber: battery.serialNumber,
-                  },
-                  controller: {
-                    id: controller.id,
-                    serialNumber: controller.serialNumber,
-                    model: controller.model,
-                    manufacturer: 'manufacturer' in controller ? controller.manufacturer : undefined,
-                    protocol: controller.protocol || 'CAN',
-                  },
-                })}
+                payload={controller.serialNumber}
               />
             )}
             {modules.map((module, index) => (
@@ -136,24 +104,7 @@ export const ReleasedBatteryQrModal: React.FC<ReleasedBatteryQrModalProps> = ({ 
                 title={`Module ${(index + 1).toString().padStart(2, '0')}`}
                 itemType="MODULE"
                 serialNumber={module.serialNumber}
-                payload={JSON.stringify({
-                  type: 'MODULE',
-                  battery: {
-                    id: battery.id,
-                    serialNumber: battery.serialNumber,
-                  },
-                  module: {
-                    id: module.id,
-                    serialNumber: module.serialNumber,
-                    qrCode: module.qrCode,
-                    moduleIndex: module.moduleIndex,
-                  },
-                  cells: (module.cells || []).map(cell => ({
-                    id: cell.id,
-                    serialNumber: cell.internalSerial,
-                    barcode: cell.supplierBarcode,
-                  })),
-                })}
+                payload={module.serialNumber}
               />
             ))}
           </div>
