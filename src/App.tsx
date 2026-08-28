@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import React, { useState } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { AppProvider, useApp } from './context/AppContext';
 import { Header } from './components/common/Header';
@@ -30,6 +30,7 @@ import { CheckCircle2, AlertTriangle, Info, X } from 'lucide-react';
 const AppContent: React.FC = () => {
   const { activeView, notifications, dismissNotification } = useApp();
   const { isAuthenticated, authLoading, currentUser } = useAuth();
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const canManageUsers = currentUser?.roleId === 'role-admin' || currentUser?.role === 'admin';
 
   // If auth is still loading (initial check in progress), show nothing
@@ -90,11 +91,19 @@ const AppContent: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-slate-50 font-sans text-slate-900 antialiased select-none">
+    <div className="app-shell flex flex-col h-screen w-screen overflow-hidden bg-slate-50 font-sans text-slate-900 antialiased select-none">
       <div className="flex flex-1 overflow-hidden">
-        <Sidebar />
+        <Sidebar isOpen={mobileNavOpen} onClose={() => setMobileNavOpen(false)} />
+        {mobileNavOpen && (
+          <button
+            type="button"
+            aria-label="Close navigation"
+            className="mobile-nav-backdrop fixed inset-0 z-40 bg-black/30 md:hidden"
+            onClick={() => setMobileNavOpen(false)}
+          />
+        )}
         <main className="flex-1 flex flex-col overflow-hidden relative bg-slate-50">
-          <Header />
+          <Header onOpenNavigation={() => setMobileNavOpen(true)} />
           {renderActiveView()}
         </main>
       </div>

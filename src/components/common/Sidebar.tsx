@@ -23,7 +23,12 @@ import {
   ChevronRight
 } from 'lucide-react';
 
-export const Sidebar: React.FC = () => {
+type SidebarProps = {
+  isOpen: boolean;
+  onClose: () => void;
+};
+
+export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
   const { activeView, setActiveView, inventoryTab, setInventoryTab } = useApp();
   const { currentUser } = useAuth();
   const canManageUsers = currentUser?.roleId === 'role-admin' || currentUser?.role === 'admin';
@@ -43,7 +48,13 @@ export const Sidebar: React.FC = () => {
   };
 
   return (
-    <aside className="w-64 bg-white border-r border-slate-200 flex flex-col shrink-0 select-none overflow-hidden">
+    <aside
+      onClick={event => {
+        const button = (event.target as HTMLElement).closest('button');
+        if (button && !button.hasAttribute('aria-expanded')) onClose();
+      }}
+      className={`app-sidebar w-64 bg-white border-r border-slate-200 flex flex-col shrink-0 select-none overflow-hidden ${isOpen ? 'is-open' : ''}`}
+    >
       <div className="shrink-0 p-4 border-b border-slate-100 bg-slate-50/60">
         <div className="flex min-h-8 items-center justify-between gap-2 mb-3">
           <Logo size="sm" className="max-w-[106px]" />

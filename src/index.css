@@ -64,3 +64,46 @@
 }
 .animate-slide-up { animation: slide-up 0.2s ease-out; }
 .animate-fade-in  { animation: fade-in  0.15s ease-out; }
+
+/* Keep the operational shell usable on narrow touch screens. */
+html, body, #root { min-width: 0; min-height: 100%; }
+
+@media (max-width: 767px) {
+  .app-shell { min-width: 0; }
+
+  .app-sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 50;
+    width: min(18rem, calc(100vw - 2.5rem));
+    transform: translateX(-105%);
+    transition: transform 180ms ease-out;
+    box-shadow: 12px 0 30px rgba(17, 17, 17, 0.12);
+  }
+
+  .app-sidebar.is-open { transform: translateX(0); }
+  .app-header { z-index: 30; }
+  .app-header > div { gap: 0.5rem; }
+  .app-header .ml-auto { gap: 0.25rem; }
+  .app-header .ml-auto > button:first-child { padding-inline: 0.5rem; }
+  .app-header [class*="w-80"] { width: min(20rem, calc(100vw - 2rem)); }
+
+  main { min-width: 0; }
+  main > div.flex-1 {
+    width: 100%;
+    min-width: 0;
+    padding: 1rem;
+  }
+
+  main > div.flex-1 > * { min-width: 0; }
+  main .overflow-x-auto { max-width: 100%; }
+  main input, main select, main textarea { max-width: 100%; }
+
+  /* Preserve readable columns for data-heavy views while scrolling the table itself. */
+  main .overflow-x-auto table { min-width: 42rem; }
+  main [class*="grid-cols-"] { min-width: 0; }
+  main [class*="grid-cols-5"], main [class*="grid-cols-4"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  main [class*="grid-cols-3"] { grid-template-columns: 1fr; }
+
+  .mobile-nav-backdrop { backdrop-filter: blur(2px); }
+}

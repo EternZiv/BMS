@@ -1,10 +1,13 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useApp } from '../../context/AppContext';
-import { Search, Cpu, RefreshCw, Bell, ChevronDown, LogOut } from 'lucide-react';
+import { Search, Cpu, RefreshCw, Bell, ChevronDown, LogOut, Menu } from 'lucide-react';
 
+type HeaderProps = {
+  onOpenNavigation: () => void;
+};
 
-export const Header: React.FC = () => {
+export const Header: React.FC<HeaderProps> = ({ onOpenNavigation }) => {
   const { currentUser, profile, logout } = useAuth();
   const { setActiveView, quickSearchQuery, setQuickSearchQuery, triggerRefresh, notifications } = useApp();
 
@@ -47,8 +50,16 @@ export const Header: React.FC = () => {
   };
 
   return (
-    <header className="h-16 bg-white border-b border-slate-200 sticky top-0 z-40 shadow-xs px-4 sm:px-6">
+    <header className="app-header h-16 bg-white border-b border-slate-200 sticky top-0 z-40 shadow-xs px-4 sm:px-6">
       <div className="mx-auto flex h-full w-full max-w-[1600px] items-center gap-6">
+        <button
+          type="button"
+          onClick={onOpenNavigation}
+          aria-label="Open navigation"
+          className="mobile-nav-button flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 md:hidden"
+        >
+          <Menu className="h-4 w-4" />
+        </button>
         <div className="hidden md:flex min-w-0 flex-1 max-w-xl">
           <form onSubmit={handleSearch} className="relative w-full">
           <input
