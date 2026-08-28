@@ -769,11 +769,17 @@ apiRouter.post('/products', requirePermission('products.edit'), (req, res) => {
   if (!body.name || !body.sku || !body.cellsPerModule || !body.numModules) {
     return res.status(400).json({ error: 'Missing required product configuration fields' });
   }
+  if (!body.productModel || !body.batteryName || !['LV', 'HV'].includes(body.voltageType)) {
+    return res.status(400).json({ error: 'Product model, battery name, and LV/HV voltage type are required' });
+  }
 
   const newProd: ProductTemplate = {
     ...body,
     id: `prod-${Date.now()}`,
     totalCells: body.numModules * body.cellsPerModule,
+    productModel: body.productModel,
+    batteryName: body.batteryName,
+    voltageType: body.voltageType,
     bmsConfig: body.bmsConfig || {
       required: true,
       model: body.bmsModel || 'PACE 51.2V',
@@ -1160,14 +1166,20 @@ apiRouter.get('/production-orders', (req, res) => {
     // Create Battery Units and Reserve Cells
     for (let q = 0; q < quantity; q++) {
       const batId = `bat-${Date.now()}-${q}`;
-      const batSerial = `${product.serialPrefix}-${String(db.batteries.size + q + 1).padStart(6, '0')}`;
+      const batteryBase = `P2G-${product.productModel.toUpperCase().replace(/[^A-Z0-9.]+/g, '')}-${new Date().toISOString().slice(2, 7).replace('-', '')}`;
+      const nextBatteryNumber = Array.from(db.batteries.values()).reduce((max, battery) => {
+        if (!/^P2G-[A-Z0-9.]+-[0-9]{4}-[0-9]{6}$/i.test(battery.serialNumber)) return max;
+        return Math.max(max, Number(battery.serialNumber.match(/(\d+)$/)?.[1] || 0));
+      }, 0) + q + 1;
+      const batSerial = `${batteryBase}-${String(nextBatteryNumber).padStart(6, '0')}`;
       batteryIds.push(batId);
 
       // Create module skeletons based on product configuration
       const modules: ModuleItem[] = [];
       for (let m = 0; m < product.numModules; m++) {
         const modId = `mod-${Date.now()}-${q}-${m}`;
-        const modSerial = `P2G-MOD-${String(db.modules.size + m + 1).padStart(6, '0')}`;
+        const nextModuleNumber = Array.from(db.modules.values()).reduce((max, module) => Math.max(max, Number(module.serialNumber.match(/^mod-(\d+)$/i)?.[1] || 0)), 0) + m + 1;
+        const modSerial = `mod-${String(nextModuleNumber).padStart(5, '0')}`;
         const mod: ModuleItem = {
           id: modId,
           serialNumber: modSerial,

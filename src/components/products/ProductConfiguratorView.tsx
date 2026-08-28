@@ -7,7 +7,6 @@ import {
   Sliders,
   Plus,
   CheckCircle2,
-  Cpu,
   Layers,
   Zap,
   Flame,
@@ -27,14 +26,14 @@ export const ProductConfiguratorView: React.FC = () => {
 
   // Form State
   const [name, setName] = useState('Power2Go 10.0 kWh LFP Standard');
-  const [sku, setSku] = useState('P2G-10KWH-LFP');
+  const [productModel, setProductModel] = useState('LV25');
+  const [batteryName, setBatteryName] = useState('10kWh');
+  const [voltageType, setVoltageType] = useState<'LV' | 'HV'>('LV');
   const [capacityKwh, setCapacityKwh] = useState(10.0);
   const [nominalVoltageV, setNominalVoltageV] = useState(51.2);
   const [totalCapacityAh, setTotalCapacityAh] = useState(200);
   const [numModules, setNumModules] = useState(2);
   const [cellsPerModule, setCellsPerModule] = useState(8);
-  const [bmsModel, setBmsModel] = useState('Daly Smart BMS 16S 100A CAN/RS485');
-  const [bmsProtocol, setBmsProtocol] = useState<'CAN_2.0B' | 'RS485' | 'MODBUS'>('CAN_2.0B');
 
   useEffect(() => {
     loadProducts();
@@ -57,20 +56,15 @@ export const ProductConfiguratorView: React.FC = () => {
     try {
       const newProduct = await api.createProduct({
         name,
-        sku,
+        productModel,
+        batteryName,
+        voltageType,
         capacityKwh,
         nominalVoltageV,
         totalCapacityAh,
         numModules,
         cellsPerModule,
         totalCells: numModules * cellsPerModule,
-        bmsModel,
-        bmsProtocol,
-        bmsConfig: {
-          required: true,
-          model: bmsModel,
-          protocol: bmsProtocol,
-        },
         bmuConfig: {
           required: false,
         },
@@ -85,7 +79,7 @@ export const ProductConfiguratorView: React.FC = () => {
           maxDeltaIrMilliOhm: 0.05,
         },
         qcStages: ['CELL_TESTING', 'GRADING', 'MATCHING', 'WELDING', 'BMS_TEST', 'FINAL_PACK'],
-        serialPrefix: 'P2G-BAT',
+        serialPrefix: 'P2G',
         active: true,
       });
 
@@ -171,9 +165,6 @@ export const ProductConfiguratorView: React.FC = () => {
                 <div>
                   <div className="flex items-center space-x-2">
                     <h3 className="text-base font-bold text-slate-900">{p.name}</h3>
-                    <span className="text-xs font-mono font-bold px-2.5 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
-                      {p.sku}
-                    </span>
                   </div>
                   <p className="text-xs text-slate-500 mt-1">
                     {p.capacityKwh} kWh • {p.nominalVoltageV} VDC • {p.totalCapacityAh} Ah Nominal
@@ -211,14 +202,6 @@ export const ProductConfiguratorView: React.FC = () => {
 
               {/* Engineering Specifications */}
               <div className="space-y-2.5 text-xs pt-1">
-                <div className="flex justify-between items-center text-slate-600">
-                  <span className="flex items-center space-x-1.5">
-                    <Cpu className="w-3.5 h-3.5 text-emerald-500" />
-                    <span>BMS Model:</span>
-                  </span>
-                  <span className="font-mono font-semibold text-slate-800">{p.bmsModel}</span>
-                </div>
-
                 <div className="flex justify-between items-center text-slate-600">
                   <span className="flex items-center space-x-1.5">
                     <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
@@ -268,14 +251,38 @@ export const ProductConfiguratorView: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">SKU / Model Number</label>
+                  <label className="block font-bold text-slate-700 mb-1">Battery Name / Size</label>
                   <input
                     type="text"
-                    value={sku}
-                    onChange={e => setSku(e.target.value)}
-                    className="w-full px-3.5 py-2.5 bg-slate-50/70 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-mono"
+                    value={batteryName}
+                    onChange={e => setBatteryName(e.target.value)}
+                    placeholder="5kWh or 7.5kWh"
+                    className="w-full px-3.5 py-2.5 bg-slate-50/70 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500"
                     required
                   />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Product Model</label>
+                  <input
+                    type="text"
+                    value={productModel}
+                    onChange={e => setProductModel(e.target.value)}
+                    placeholder="LV25"
+                    className="w-full px-3.5 py-2.5 bg-slate-50/70 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-mono uppercase"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Battery Voltage Type</label>
+                  <select
+                    value={voltageType}
+                    onChange={e => setVoltageType(e.target.value as 'LV' | 'HV')}
+                    className="w-full px-3.5 py-2.5 bg-slate-50/70 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-semibold"
+                    required
+                  >
+                    <option value="LV">LV - Low Voltage</option>
+                    <option value="HV">HV - High Voltage</option>
+                  </select>
                 </div>
               </div>
 
@@ -336,28 +343,6 @@ export const ProductConfiguratorView: React.FC = () => {
                 </div>
                 <div className="col-span-2 text-center text-slate-600 font-mono text-[11px]">
                   Total Calculated Cells: <strong>{numModules * cellsPerModule} cells</strong>
-                </div>
-              </div>
-
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">BMS Specification & Protocol</label>
-                <div className="grid grid-cols-2 gap-2.5">
-                  <input
-                    type="text"
-                    value={bmsModel}
-                    onChange={e => setBmsModel(e.target.value)}
-                    className="w-full px-3.5 py-2.5 bg-slate-50/70 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-mono"
-                    placeholder="BMS Model name"
-                  />
-                  <select
-                    value={bmsProtocol}
-                    onChange={e => setBmsProtocol(e.target.value as any)}
-                    className="w-full px-3.5 py-2.5 bg-slate-50/70 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-semibold"
-                  >
-                    <option value="CAN_2.0B">CAN 2.0B (Standard)</option>
-                    <option value="RS485">RS485 Modbus</option>
-                    <option value="MODBUS">TCP Modbus</option>
-                  </select>
                 </div>
               </div>
 

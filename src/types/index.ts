@@ -98,6 +98,9 @@ export interface ProductTemplate {
   id: string;
   sku: string;
   name: string;
+  productModel: string;
+  batteryName: string;
+  voltageType: 'LV' | 'HV';
   nominalVoltageV: number;
   capacityKwh: number;
   totalCapacityAh: number;

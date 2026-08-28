@@ -49,7 +49,6 @@ export const InventoryView: React.FC = () => {
   const [bmsModel, setBmsModel] = useState('PACE-51.2V-100A-CAN');
   const [bmsManufacturer, setBmsManufacturer] = useState('');
   const [bmsBatchNumber, setBmsBatchNumber] = useState('');
-  const [bmsBarcodePrefix, setBmsBarcodePrefix] = useState('');
   const [bmsSerials, setBmsSerials] = useState('');
   const [ingestingBms, setIngestingBms] = useState(false);
   const [showBmuModal, setShowBmuModal] = useState(false);
@@ -57,7 +56,6 @@ export const InventoryView: React.FC = () => {
   const [bmuModel, setBmuModel] = useState('Power2Go BMU-X1');
   const [bmuManufacturer, setBmuManufacturer] = useState('Power2Go');
   const [bmuBatchNumber, setBmuBatchNumber] = useState('');
-  const [bmuBarcodePrefix, setBmuBarcodePrefix] = useState('');
   const [bmuSerials, setBmuSerials] = useState('');
   const [serialScanner, setSerialScanner] = useState<'BMS' | 'BMU' | null>(null);
   const [ingestingBmu, setIngestingBmu] = useState(false);
@@ -132,7 +130,7 @@ export const InventoryView: React.FC = () => {
     try {
       const serialNumbers = bmuSerials.split(/[\n,;]+/).map(value => value.trim()).filter(Boolean);
       if (serialNumbers.length > 0 && serialNumbers.length !== bmuCount) throw new Error(`Enter exactly ${bmuCount} BMU serials, or leave serials empty to generate them.`);
-      const res = await api.createBmuBatch({ count: bmuCount, model: bmuModel, manufacturer: bmuManufacturer, batchNumber: bmuBatchNumber, barcodePrefix: bmuBarcodePrefix || undefined, serialNumbers });
+      const res = await api.createBmuBatch({ count: bmuCount, model: bmuModel, manufacturer: bmuManufacturer, batchNumber: bmuBatchNumber, serialNumbers });
       addNotification('success', 'BMU Batch Received', `Successfully ingested ${res.count} ${bmuModel} controllers`);
       setShowBmuModal(false);
       triggerRefresh();
@@ -150,7 +148,7 @@ export const InventoryView: React.FC = () => {
     try {
       const serialNumbers = bmsSerials.split(/[\n,;]+/).map(value => value.trim()).filter(Boolean);
       if (serialNumbers.length > 0 && serialNumbers.length !== bmsCount) throw new Error(`Enter exactly ${bmsCount} BMS serials, or leave serials empty to generate them.`);
-      const res = await api.createBmsBatch({ count: bmsCount, model: bmsModel, supplier: bmsManufacturer || 'Unknown Supplier', manufacturer: bmsManufacturer || undefined, batchNumber: bmsBatchNumber, barcodePrefix: bmsBarcodePrefix || undefined, serialNumbers });
+      const res = await api.createBmsBatch({ count: bmsCount, model: bmsModel, supplier: bmsManufacturer || 'Unknown Supplier', manufacturer: bmsManufacturer, batchNumber: bmsBatchNumber, serialNumbers });
       addNotification('success', 'BMS Batch Received', `Successfully ingested ${res.count} ${bmsModel} controllers`);
       setShowBmsModal(false);
       triggerRefresh();
@@ -842,19 +840,6 @@ export const InventoryView: React.FC = () => {
 
             <form onSubmit={handleIngestBms} className="space-y-4 pt-2">
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">BMS Model / Hardware Spec</label>
-                <select
-                  value={bmsModel}
-                  onChange={e => setBmsModel(e.target.value)}
-                  className="w-full px-3.5 py-2.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-semibold"
-                >
-                  <option value="PACE-51.2V-100A-CAN">PACE 51.2V 100A CAN 2.0B Smart BMS</option>
-                  <option value="SEPLOS-51.2V-200A-CAN">SEPLOS Mason 51.2V 200A CAN/RS485 BMS</option>
-                  <option value="DALY-HV-76.8V-250A">DALY High-Voltage 76.8V 250A Industrial BMS</option>
-                </select>
-              </div>
-
-              <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">Batch Quantity (Units)</label>
                 <input
                   type="number"
@@ -866,25 +851,15 @@ export const InventoryView: React.FC = () => {
                 />
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <input value={bmsManufacturer} onChange={e => setBmsManufacturer(e.target.value)} placeholder="Manufacturer" className="px-3.5 py-2.5 text-xs border border-slate-200 rounded-xl" />
+                <input value={bmsManufacturer} onChange={e => setBmsManufacturer(e.target.value)} placeholder="Manufacturer name" className="px-3.5 py-2.5 text-xs border border-slate-200 rounded-xl" required />
                 <input value={bmsBatchNumber} onChange={e => setBmsBatchNumber(e.target.value)} placeholder="Supplier batch number" className="px-3.5 py-2.5 text-xs border border-slate-200 rounded-xl" required />
               </div>
-              <input value={bmsBarcodePrefix} onChange={e => setBmsBarcodePrefix(e.target.value)} placeholder="Barcode prefix (optional)" className="w-full px-3.5 py-2.5 text-xs font-mono border border-slate-200 rounded-xl" />
               <div className="space-y-2">
                 <label className="block text-xs font-bold text-slate-700">Serial / Barcode Values</label>
-                <textarea value={bmsSerials} onChange={e => setBmsSerials(e.target.value)} placeholder="Enter one serial per line, or scan below" rows={3} className="w-full px-3.5 py-2.5 text-xs font-mono border border-slate-200 rounded-xl" />
+                <div className="min-h-12 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono text-slate-600">
+                  {bmsSerials || 'Scan each BMS serial below'}
+                </div>
                 <button type="button" onClick={() => setSerialScanner('BMS')} className="flex items-center gap-2 px-3 py-2 text-xs font-bold text-emerald-700 border border-emerald-200 rounded-lg"><QrCode className="w-4 h-4" /> Scan BMS Serial</button>
-              </div>
-
-              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-[11px] text-slate-600 space-y-1 font-mono">
-                <div className="flex justify-between">
-                  <span>Protocol:</span>
-                  <strong className="text-emerald-700 font-sans">CAN 2.0B / RS485</strong>
-                </div>
-                <div className="flex justify-between">
-                  <span>Firmware:</span>
-                  <strong className="text-slate-800">v4.2.1-prod (Certified)</strong>
-                </div>
               </div>
 
               <div className="flex justify-end space-x-2 pt-2 border-t border-slate-100">
@@ -913,12 +888,9 @@ export const InventoryView: React.FC = () => {
           <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 space-y-4 border border-slate-200">
             <div className="flex items-center space-x-3"><span className="p-2.5 bg-emerald-50 text-emerald-700 rounded-xl border border-emerald-100"><Cpu className="w-5 h-5" /></span><div><h3 className="text-base font-black text-slate-900">Receive BMU Inventory Batch</h3><p className="text-xs text-slate-500">Ingest certified Battery Management Unit controllers</p></div></div>
             <form onSubmit={handleIngestBmu} className="space-y-4 pt-2">
-              <div><label className="block text-xs font-bold text-slate-700 mb-1">BMU Model</label><input value={bmuModel} onChange={e => setBmuModel(e.target.value)} className="w-full px-3.5 py-2.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 font-semibold" required /></div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3"><input value={bmuManufacturer} onChange={e => setBmuManufacturer(e.target.value)} placeholder="Manufacturer" className="px-3.5 py-2.5 text-xs border border-slate-200 rounded-xl" required /><input value={bmuBatchNumber} onChange={e => setBmuBatchNumber(e.target.value)} placeholder="Supplier batch number" className="px-3.5 py-2.5 text-xs border border-slate-200 rounded-xl" required /></div>
-              <input value={bmuBarcodePrefix} onChange={e => setBmuBarcodePrefix(e.target.value)} placeholder="Barcode prefix (optional)" className="w-full px-3.5 py-2.5 text-xs font-mono border border-slate-200 rounded-xl" />
-              <div className="space-y-2"><label className="block text-xs font-bold text-slate-700">Serial / Barcode Values</label><textarea value={bmuSerials} onChange={e => setBmuSerials(e.target.value)} placeholder="Enter one serial per line, or scan below" rows={3} className="w-full px-3.5 py-2.5 text-xs font-mono border border-slate-200 rounded-xl" /><button type="button" onClick={() => setSerialScanner('BMU')} className="flex items-center gap-2 px-3 py-2 text-xs font-bold text-emerald-700 border border-emerald-200 rounded-lg"><QrCode className="w-4 h-4" /> Scan BMU Serial</button></div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3"><input value={bmuManufacturer} onChange={e => setBmuManufacturer(e.target.value)} placeholder="Manufacturer name" className="px-3.5 py-2.5 text-xs border border-slate-200 rounded-xl" required /><input value={bmuBatchNumber} onChange={e => setBmuBatchNumber(e.target.value)} placeholder="Supplier batch number" className="px-3.5 py-2.5 text-xs border border-slate-200 rounded-xl" required /></div>
+              <div className="space-y-2"><label className="block text-xs font-bold text-slate-700">Serial / Barcode Values</label><div className="min-h-12 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono text-slate-600">{bmuSerials || 'Scan each BMU serial below'}</div><button type="button" onClick={() => setSerialScanner('BMU')} className="flex items-center gap-2 px-3 py-2 text-xs font-bold text-emerald-700 border border-emerald-200 rounded-lg"><QrCode className="w-4 h-4" /> Scan BMU Serial</button></div>
               <div><label className="block text-xs font-bold text-slate-700 mb-1">Batch Quantity (Units)</label><input type="number" min="1" value={bmuCount} onChange={e => setBmuCount(Math.max(1, parseInt(e.target.value) || 1))} className="w-full px-3.5 py-2.5 text-xs font-mono border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500" required /></div>
-              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 text-[11px] text-slate-600 font-mono"><div className="flex justify-between"><span>Protocol:</span><strong className="text-emerald-700 font-sans">CAN</strong></div><div className="flex justify-between"><span>Manufacturer:</span><strong className="text-slate-800">Power2Go</strong></div></div>
               <div className="flex justify-end space-x-2 pt-2 border-t border-slate-100"><button type="button" onClick={() => setShowBmuModal(false)} className="px-4 py-2 text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors">Cancel</button><button type="submit" disabled={ingestingBmu} className="px-5 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-300 rounded-xl shadow-xs transition-colors">{ingestingBmu ? 'Receiving...' : `Receive ${bmuCount} Units`}</button></div>
             </form>
           </div>

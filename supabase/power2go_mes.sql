@@ -158,6 +158,9 @@ create table if not exists public.product_templates (
     id text primary key,
     sku text not null unique,
     name text not null,
+    product_model text not null default '',
+    battery_name text not null default '',
+    voltage_type text not null default 'LV' check (voltage_type in ('LV', 'HV')),
     nominal_voltage_v numeric not null,
     capacity_kwh numeric not null,
     total_capacity_ah numeric not null,
@@ -175,6 +178,21 @@ create table if not exists public.product_templates (
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
 );
+
+alter table public.product_templates add column if not exists battery_name text;
+alter table public.product_templates add column if not exists product_model text;
+alter table public.product_templates add column if not exists voltage_type text;
+update public.product_templates set product_model = coalesce(nullif(product_model, ''), sku) where product_model is null or product_model = '';
+update public.product_templates set battery_name = coalesce(nullif(battery_name, ''), name) where battery_name is null or battery_name = '';
+alter table public.product_templates alter column product_model set default '';
+update public.product_templates set voltage_type = 'LV' where voltage_type is null or voltage_type not in ('LV', 'HV');
+alter table public.product_templates alter column battery_name set default '';
+alter table public.product_templates alter column voltage_type set default 'LV';
+alter table public.product_templates alter column battery_name set not null;
+alter table public.product_templates alter column product_model set not null;
+alter table public.product_templates alter column voltage_type set not null;
+alter table public.product_templates drop constraint if exists product_templates_voltage_type_check;
+alter table public.product_templates add constraint product_templates_voltage_type_check check (voltage_type in ('LV', 'HV'));
 
 create table if not exists public.suppliers (
     id text primary key,
@@ -773,6 +791,13 @@ declare
     v_module_id text;
     v_module_serial text;
     v_serial_prefix text;
+    v_product_model text;
+    v_battery_name text;
+    v_voltage_type text;
+    v_serial_base text;
+    v_production_period text;
+    v_next_battery_number integer;
+    v_next_module_number integer;
     v_num_modules integer;
     v_cells_per_module integer;
     v_total_cells_per_battery integer;
@@ -781,14 +806,35 @@ declare
     j integer;
     v_cell_slice_ids text[];
 begin
-    select serial_prefix, num_modules, cells_per_module, total_cells
-    into v_serial_prefix, v_num_modules, v_cells_per_module, v_total_cells_per_battery
+    select serial_prefix, product_model, battery_name, voltage_type, num_modules, cells_per_module, total_cells
+    into v_serial_prefix, v_product_model, v_battery_name, v_voltage_type, v_num_modules, v_cells_per_module, v_total_cells_per_battery
     from public.product_templates
     where id = p_product_id and active = true;
 
     if not found then
         raise exception 'Product template % not found or inactive', p_product_id;
     end if;
+
+    v_voltage_type := upper(coalesce(v_voltage_type, case when v_serial_prefix ilike '%HV%' then 'HV' else 'LV' end));
+    if v_voltage_type not in ('LV', 'HV') then
+        raise exception 'Product template % must specify LV or HV voltage type', p_product_id;
+    end if;
+    v_product_model := upper(regexp_replace(trim(coalesce(v_product_model, '')), '[^a-zA-Z0-9.]+', '', 'g'));
+    if v_product_model = '' then
+        raise exception 'Product template % must specify a product model', p_product_id;
+    end if;
+    v_production_period := to_char(current_date, 'YYMM');
+    v_serial_base := 'P2G-' || v_product_model || '-' || v_production_period;
+    perform pg_advisory_xact_lock(hashtext('P2G-battery-serials'));
+    select coalesce(max((substring(serial_number from '([0-9]+)$'))::integer), 0) + 1
+    into v_next_battery_number
+    from public.batteries
+    where serial_number ~ '^P2G-[A-Z0-9.]+-[0-9]{4}-[0-9]{6}$';
+    perform pg_advisory_xact_lock(hashtext('mod-global')); 
+    select coalesce(max((substring(serial_number from '([0-9]+)$'))::integer), 0) + 1
+    into v_next_module_number
+    from public.modules
+    where serial_number ~ '^mod-[0-9]+$';
 
     v_required_cells := v_total_cells_per_battery * p_quantity;
 
@@ -811,7 +857,7 @@ begin
 
     for i in 1..p_quantity loop
         v_battery_id := 'bat-' || gen_random_uuid()::text;
-        v_battery_serial := v_serial_prefix || '-' || replace(gen_random_uuid()::text, '-', '');
+        v_battery_serial := v_serial_base || '-' || lpad((v_next_battery_number + i - 1)::text, 6, '0');
         v_battery_ids := array_append(v_battery_ids, v_battery_id);
 
         insert into public.batteries (id, serial_number, production_order_id, product_id, current_step, status, progress_percent, step_results_json)
@@ -840,7 +886,8 @@ begin
 
         for j in 1..v_num_modules loop
             v_module_id := 'mod-' || gen_random_uuid()::text;
-            v_module_serial := v_battery_serial || '-MOD-' || j;
+            v_module_serial := 'mod-' || lpad(v_next_module_number::text, 5, '0');
+            v_next_module_number := v_next_module_number + 1;
             
             insert into public.modules (id, battery_id, production_order_id, module_index, serial_number, status)
             values (v_module_id, v_battery_id, v_order_id, j - 1, v_module_serial, 'CREATED');

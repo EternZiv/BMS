@@ -429,12 +429,18 @@ async getUsers(): Promise<User[]> {
 
   async createProduct(product: Partial<ProductTemplate>): Promise<ProductTemplate> {
     const normalizedProtocol = product.bmsProtocol === 'CAN_2.0B' ? 'CAN_2_0B' : product.bmsProtocol;
+    const generatedSku = `${product.productModel || product.name || 'PRODUCT'}-${product.batteryName || 'BATTERY'}-${Date.now()}`
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, '-');
     const { data, error } = await supabase
       .from('product_templates')
       .insert({
         id: `prod-${Date.now()}`,
-        sku: product.sku || '',
+        sku: product.sku || generatedSku,
         name: product.name || '',
+        product_model: product.productModel || product.sku || '',
+        battery_name: product.batteryName || product.name || '',
+        voltage_type: product.voltageType || 'LV',
         nominalVoltageV: product.nominalVoltageV || 0,
         capacityKwh: product.capacityKwh || 0,
         totalCapacityAh: product.totalCapacityAh || 0,
