@@ -46,9 +46,16 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
   const controlsRef = useRef<{ stop: () => void } | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const scanLockRef = useRef(false);
+  const nativeScanTimerRef = useRef<number | null>(null);
+  const nativeScanInFlightRef = useRef(false);
 
   const cleanupCamera = async () => {
     scanLockRef.current = false;
+    if (nativeScanTimerRef.current !== null) {
+      window.clearInterval(nativeScanTimerRef.current);
+      nativeScanTimerRef.current = null;
+    }
+    nativeScanInFlightRef.current = false;
     if (controlsRef.current) {
       try {
         controlsRef.current.stop();
@@ -147,6 +154,34 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
           });
         }
         await videoRef.current.play().catch(() => undefined);
+      }
+
+      const BarcodeDetector = (window as any).BarcodeDetector;
+      if (BarcodeDetector && videoRef.current) {
+        try {
+          const detector = new BarcodeDetector({ formats: ['qr_code'] });
+          nativeScanTimerRef.current = window.setInterval(() => {
+            const video = videoRef.current;
+            if (nativeScanInFlightRef.current || scanLockRef.current || !video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+            nativeScanInFlightRef.current = true;
+            void detector.detect(video)
+              .then((codes: Array<{ rawValue?: string }>) => {
+                const value = codes[0]?.rawValue;
+                if (value && !scanLockRef.current) {
+                  scanLockRef.current = true;
+                  setBarcode(value);
+                  setStatus('QR code detected — identifying component');
+                  void handleScanValue(value);
+                }
+              })
+              .catch(() => undefined)
+              .finally(() => {
+                nativeScanInFlightRef.current = false;
+              });
+          }, 180);
+        } catch {
+          // Continue with ZXing when BarcodeDetector is unavailable or unsupported.
+        }
       }
 
       const hints = new Map<DecodeHintType, any>([
