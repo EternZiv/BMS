@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { BrowserMultiFormatReader } from '@zxing/browser';
-import { Camera, QrCode, Search, AlertTriangle, X, ArrowRight, CheckCircle2, RefreshCw } from 'lucide-react';
+import { Camera, QrCode, Search, AlertTriangle, X, ArrowRight, CheckCircle2, RefreshCw, Flashlight, FlashlightOff } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 
 interface ScannerModalProps {
@@ -36,6 +36,8 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
   const [isCameraLoading, setIsCameraLoading] = useState(false);
   const [cameraOptions, setCameraOptions] = useState<MediaDeviceInfo[]>([]);
   const [selectedCameraId, setSelectedCameraId] = useState<string>('');
+  const [torchSupported, setTorchSupported] = useState(false);
+  const [torchOn, setTorchOn] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -63,8 +65,9 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
     }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track: MediaStreamTrack) => track.stop());
-      streamRef.current = null;
     }
+    setTorchSupported(false);
+    setTorchOn(false);
     if (videoRef.current) {
       videoRef.current.pause();
       videoRef.current.srcObject = null;
@@ -113,6 +116,10 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       streamRef.current = stream;
+      const videoTrack = stream.getVideoTracks()[0];
+      const capabilities = videoTrack?.getCapabilities?.();
+      setTorchSupported(Boolean(capabilities && 'torch' in capabilities && capabilities.torch));
+      setTorchOn(false);
 
       if (videoRef.current) {
         videoRef.current.muted = true;
@@ -171,9 +178,22 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
     }
   };
 
+  const toggleTorch = async () => {
+    const track = streamRef.current?.getVideoTracks()[0];
+    if (!track || !torchSupported) return;
+
+    const nextTorchState = !torchOn;
+    try {
+      await track.applyConstraints({ advanced: [{ torch: nextTorchState }] });
+      setTorchOn(nextTorchState);
+    } catch (err) {
+      console.warn('Unable to toggle camera flash', err);
+      setStatus('Flash unavailable on this camera');
+    }
+  };
+
   useEffect(() => {
     const isCompact = window.matchMedia('(max-width: 1024px)').matches;
-    setCompactDevice(isCompact);
     if (!isOpen) {
       void cleanupCamera();
       setError(null);
@@ -295,17 +315,15 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
             >
               Camera Scan
             </button>
-            {!compactDevice && (
-              <button
-                type="button"
-                onClick={() => setMode('manual')}
-                className={`flex-1 rounded-lg px-3 py-2 text-xs font-bold transition-colors ${
-                  mode === 'manual' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-200'
-                }`}
-              >
-                Manual Entry
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => setMode('manual')}
+              className={`flex-1 rounded-lg px-3 py-2 text-xs font-bold transition-colors ${
+                mode === 'manual' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-200'
+              }`}
+            >
+              Manual Entry
+            </button>
           </div>
 
           {mode === 'camera' ? (
@@ -329,6 +347,19 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
 
               <div className="relative bg-slate-950 rounded-xl overflow-hidden border border-slate-800 h-52 sm:h-56">
                 <div className="absolute inset-x-10 inset-y-6 border-2 border-dashed border-emerald-500/70 rounded-xl pointer-events-none" />
+                <button
+                  type="button"
+                  onClick={() => void toggleTorch()}
+                  disabled={!torchSupported}
+                  aria-label={torchSupported ? (torchOn ? 'Turn flash off' : 'Turn flash on') : 'Flash unavailable'}
+                  aria-pressed={torchOn}
+                  title={torchSupported ? (torchOn ? 'Turn flash off' : 'Turn flash on') : 'Flash unavailable on this camera'}
+                  className={`absolute right-3 top-3 z-10 flex h-9 w-9 items-center justify-center rounded-lg border border-white/30 text-white ${
+                    torchSupported ? 'bg-black/60 hover:bg-black/80' : 'cursor-not-allowed bg-black/30 opacity-60'
+                  }`}
+                >
+                  {torchOn ? <FlashlightOff className="h-4 w-4" /> : <Flashlight className="h-4 w-4" />}
+                </button>
                 <video
                   ref={videoRef}
                   className="h-full w-full object-cover"
