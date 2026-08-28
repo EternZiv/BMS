@@ -27,6 +27,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
 }) => {
   const { currentUser } = useAuth();
   const [mode, setMode] = useState<'camera' | 'manual'>(initialMode);
+  const [compactDevice, setCompactDevice] = useState(false);
   const [barcode, setBarcode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState('Camera scanner ready');
@@ -171,19 +172,21 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
   };
 
   useEffect(() => {
+    const isCompact = window.matchMedia('(max-width: 1024px)').matches;
+    setCompactDevice(isCompact);
     if (!isOpen) {
       void cleanupCamera();
       setError(null);
       setBarcode('');
       setStatus('Camera scanner ready');
       setCameraError(null);
-      setMode(initialMode);
+      setMode(isCompact ? 'camera' : initialMode);
       return;
     }
 
     setError(null);
     setBarcode('');
-    setMode(initialMode);
+    setMode(isCompact ? 'camera' : initialMode);
     setStatus('Camera scanner ready');
     setCameraError(null);
     setIsSubmitting(false);
@@ -292,15 +295,17 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
             >
               Camera Scan
             </button>
-            <button
-              type="button"
-              onClick={() => setMode('manual')}
-              className={`flex-1 rounded-lg px-3 py-2 text-xs font-bold transition-colors ${
-                mode === 'manual' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-200'
-              }`}
-            >
-              Manual Entry
-            </button>
+            {!compactDevice && (
+              <button
+                type="button"
+                onClick={() => setMode('manual')}
+                className={`flex-1 rounded-lg px-3 py-2 text-xs font-bold transition-colors ${
+                  mode === 'manual' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                Manual Entry
+              </button>
+            )}
           </div>
 
           {mode === 'camera' ? (
