@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { BrowserMultiFormatReader } from '@zxing/browser';
+import { BarcodeFormat, DecodeHintType } from '@zxing/library';
 import { Camera, QrCode, Search, AlertTriangle, X, ArrowRight, CheckCircle2, RefreshCw, Flashlight, FlashlightOff } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 
@@ -109,8 +110,8 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
 
       const constraints: MediaStreamConstraints = {
         video: deviceId
-          ? { deviceId: { exact: deviceId } }
-          : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+          ? { deviceId: { exact: deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 }, aspectRatio: { ideal: 16 / 9 } }
+          : { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 }, aspectRatio: { ideal: 16 / 9 } },
         audio: false,
       };
 
@@ -120,6 +121,17 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
       const capabilities = videoTrack?.getCapabilities?.();
       setTorchSupported(Boolean(capabilities && 'torch' in capabilities && capabilities.torch));
       setTorchOn(false);
+      if (videoTrack && capabilities) {
+        const advanced: MediaTrackConstraintSet[] = [];
+        if ('focusMode' in capabilities && capabilities.focusMode?.includes('continuous')) {
+          advanced.push({ focusMode: 'continuous' });
+        }
+        if ('zoom' in capabilities && capabilities.zoom) {
+          const zoom = capabilities.zoom;
+          advanced.push({ zoom: Math.min(zoom.max, Math.max(zoom.min, Math.max(1.5, zoom.min))) });
+        }
+        if (advanced.length > 0) await videoTrack.applyConstraints({ advanced });
+      }
 
       if (videoRef.current) {
         videoRef.current.muted = true;
@@ -136,7 +148,14 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
         await videoRef.current.play().catch(() => undefined);
       }
 
-      const reader = new BrowserMultiFormatReader();
+      const hints = new Map<DecodeHintType, any>([
+        [DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.QR_CODE, BarcodeFormat.CODE_128, BarcodeFormat.CODE_39, BarcodeFormat.EAN_13, BarcodeFormat.EAN_8]],
+        [DecodeHintType.TRY_HARDER, true],
+      ]);
+      const reader = new BrowserMultiFormatReader(hints, {
+        delayBetweenScanAttempts: 80,
+        delayBetweenScanSuccess: 500,
+      });
       readerRef.current = reader;
 
       const controls = await reader.decodeFromStream(
