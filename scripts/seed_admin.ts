@@ -52,25 +52,25 @@ async function seedAdmin() {
     console.log('Admin auth user already exists:', existingAdmin.id);
     userId = existingAdmin.id;
     // Reset password
-    const { error: pwErr } = await adminClient.auth.admin.updateUserById(userId, { password: 'pass' });
+    const { error: pwErr } = await adminClient.auth.admin.updateUserById(userId, { password: 'admin123456' });
     if (pwErr) console.warn('Password reset warning:', pwErr.message);
-    else console.log('Password reset to "pass"');
+    else console.log('Password reset to "admin123456"');
   } else {
     // Try createUser, but handle the "Database error" case by re-listing
     const { data: newUser, error: createErr } = await adminClient.auth.admin.createUser({
       email: 'admin@gmail.com',
-      password: 'pass',
+      password: 'admin123456',
       email_confirm: true,
       user_metadata: { name: 'Administrator' }
     });
     if (createErr) {
       // May already exist despite not showing in list — re-check
       const { data: reList } = await adminClient.auth.admin.listUsers({ perPage: 1000 });
-      const found = reList?.users?.find((u: any) => u.email === 'admin@power2go.com');
+      const found = reList?.users?.find((u: any) => u.email === 'admin@gmail.com');
       if (found) {
         userId = found.id;
         console.log('User already existed (found on retry):', userId);
-        await adminClient.auth.admin.updateUserById(userId, { password: 'pass' });
+        await adminClient.auth.admin.updateUserById(userId, { password: 'admin123456' });
       } else {
         throw createErr;
       }
@@ -93,7 +93,7 @@ async function seedAdmin() {
 
   console.log('\nAdmin account ready:');
   console.log('  Email   : admin@gmail.com');
-  console.log('  Password: pass');
+  console.log('  Password: admin123456');
   console.log('  User ID :', userId);
 }
 

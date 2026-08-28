@@ -15,7 +15,7 @@ import {
 } from './auth.ts';
 import { sendOtpEmail } from './email.ts';
 import { ProductTemplate, CellItem, ModuleItem, BatteryUnit, ProductionOrder, Role, User } from '../src/types';
-import { getBearerToken, getServiceClient, getUserFromBearer, rememberUserJwt } from './supabase.ts';
+import { getBearerToken, getServiceClient, getUserFromBearer, getUserScopedClient, rememberUserJwt } from './supabase.ts';
 
 function publicUser(user: User) {
   return {
@@ -41,11 +41,11 @@ function issueLocalSession(res: any, user: User) {
   return { sessionId, user: publicUser(user) };
 }
 
-async function ensureLocalUserFromSupabase(sbUser: { id: string; email?: string | null; user_metadata?: Record<string, any> }): Promise<User> {
+async function ensureLocalUserFromSupabase(sbUser: { id: string; email?: string | null; user_metadata?: Record<string, any> }, accessToken?: string): Promise<User> {
   const email = sbUser.email || '';
-  const service = getServiceClient();
-  const { data: profile } = service
-    ? await service.from('profiles').select('full_name, username, role_id, badge_id, status').eq('id', sbUser.id).maybeSingle()
+  const profileClient = accessToken ? getUserScopedClient(accessToken) : getServiceClient();
+  const { data: profile } = profileClient
+    ? await profileClient.from('profiles').select('full_name, username, role_id, badge_id, status').eq('id', sbUser.id).maybeSingle()
     : { data: null };
   const roleId = profile?.role_id || sbUser.user_metadata?.role_id || 'role-operator';
   const role = db.roles.find(item => item.id === roleId);
@@ -283,7 +283,7 @@ apiRouter.get('/auth/me', async (req: any, res: any) => {
   const sbUser = await getUserFromBearer(req.headers.authorization);
   if (sbUser) {
     rememberUserJwt(token);
-    const user = await ensureLocalUserFromSupabase(sbUser);
+    const user = await ensureLocalUserFromSupabase(sbUser, token || undefined);
     return res.json({
       id: user.id,
       name: user.name,
@@ -343,7 +343,7 @@ apiRouter.use(async (req: any, res: any, next: any) => {
   const sbUser = await getUserFromBearer(req.headers.authorization);
   if (sbUser) {
     rememberUserJwt(token);
-    const local = await ensureLocalUserFromSupabase(sbUser);
+    const local = await ensureLocalUserFromSupabase(sbUser, token || undefined);
     req.userId = local.id;
     req.session = { userId: local.id, username: local.username, role: local.role, roleId: local.roleId };
     if (req.body && typeof req.body === 'object') req.body.userId = local.id;

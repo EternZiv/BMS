@@ -128,7 +128,7 @@ export const SecurityView: React.FC = () => {
   }, [isAuthenticated]);
 
   useEffect(() => {
-    if (!userRoleId && roles.length > 0) setUserRoleId(roles[0].id);
+    if (!userRoleId && roles.length > 0) setUserRoleId('role-operator');
   }, [roles, userRoleId]);
 
   const handleOpenEditUser = (u: User) => {
@@ -272,7 +272,7 @@ export const SecurityView: React.FC = () => {
                   setUserName('');
                   setUserUsername('');
                   setUserEmail('');
-                  setUserRoleId(roles[0]?.id || '');
+                  setUserRoleId('role-operator');
                   setUserStatus('ACTIVE');
                   setUserBadgeId('');
                   setUserPassword('');

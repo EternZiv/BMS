@@ -100,6 +100,56 @@ begin
     return false;
 end;
 $$ language plpgsql security definer;
+
+create or replace function public.email_for_username(p_username text)
+returns text as $$
+declare
+        result_email text;
+begin
+        select email into result_email
+        from public.profiles
+        where lower(username) = lower(trim(p_username))
+            and status = 'ACTIVE'
+        limit 1;
+        return result_email;
+end;
+$$ language plpgsql security definer set search_path = public;
+
+revoke all on function public.email_for_username(text) from public;
+grant execute on function public.email_for_username(text) to anon, authenticated;
+
+create or replace function public.handle_new_auth_user()
+returns trigger as $$
+declare
+    assigned_role text;
+begin
+    assigned_role := case
+        when lower(new.email) in ('admin@gmail.com', 'admin@power2go.com') then 'role-admin'
+        when (new.raw_user_meta_data->>'role_id') in ('role-admin', 'role-operator') then new.raw_user_meta_data->>'role_id'
+        else 'role-operator'
+    end;
+
+    insert into public.profiles (id, full_name, email, username, role_id, status)
+    values (
+        new.id,
+        coalesce(new.raw_user_meta_data->>'full_name', new.raw_user_meta_data->>'name', split_part(new.email, '@', 1)),
+        new.email,
+        coalesce(new.raw_user_meta_data->>'username', split_part(new.email, '@', 1)),
+        assigned_role,
+        'ACTIVE'
+    )
+    on conflict (id) do update set
+        email = excluded.email,
+        role_id = case when excluded.role_id = 'role-admin' then 'role-admin' else public.profiles.role_id end,
+        updated_at = now();
+    return new;
+end;
+$$ language plpgsql security definer set search_path = public;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+    after insert on auth.users
+    for each row execute function public.handle_new_auth_user();
 -- ================================================================
 -- 3. MASTER DATA
 -- ================================================================
@@ -1819,7 +1869,7 @@ begin
             admin_uid,
             '00000000-0000-0000-0000-000000000000',
             'admin@gmail.com',
-            crypt('pass', gen_salt('bf')),
+            crypt('admin123456', gen_salt('bf')),
             now(),
             '{"provider":"email","providers":["email"]}',
             '{"name":"Administrator"}',
@@ -1843,6 +1893,12 @@ begin
         insert into public.profiles (id, full_name, email, username, role_id, status)
         values (admin_uid, 'Administrator', 'admin@gmail.com', 'admin', 'role-admin', 'ACTIVE');
     end if;
+
+    update auth.users
+    set encrypted_password = crypt('admin123456', gen_salt('bf')),
+        email_confirmed_at = coalesce(email_confirmed_at, now()),
+        updated_at = now()
+    where id = admin_uid;
 end $$;
 
 -- ================================================================
