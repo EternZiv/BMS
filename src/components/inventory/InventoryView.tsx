@@ -4,6 +4,7 @@ import { api } from '../../services/api';
 import { CellItem, BMSItem, BMUItem, ModuleItem, BatteryUnit } from '../../types';
 import { QRCodeModal } from '../common/QRCodeModal';
 import { ScannerModal } from '../common/ScannerModal';
+import { BatteryReportModal } from '../common/BatteryReportModal';
 import {
   Boxes,
   Layers,
@@ -19,6 +20,7 @@ import {
   Plus,
   Pencil,
   Trash2,
+  Download,
 } from 'lucide-react';
 
 type Tab = 'CELLS' | 'BMS' | 'BMU' | 'MODULES' | 'BATTERIES';
@@ -64,6 +66,7 @@ export const InventoryView: React.FC = () => {
   const [selectedItem, setSelectedItem] = useState<any | null>(null);
   const [qrModalOpen, setQrModalOpen] = useState(false);
   const [qrData, setQrData] = useState<any | null>(null);
+  const [reportBattery, setReportBattery] = useState<BatteryUnit | null>(null);
 
   useEffect(() => {
     setCellDisplayLimit(50);
@@ -788,6 +791,15 @@ export const InventoryView: React.FC = () => {
                       </button>
                       <button
                         onClick={() => {
+                          setReportBattery(b);
+                        }}
+                        className="p-1.5 text-slate-500 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors"
+                        title="Generate battery report"
+                      >
+                        <Download className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => {
                           setActiveBatteryId(b.id);
                           setActiveView('workflow-pack');
                           addNotification('info', 'Battery Assembly Opened', `Opening auto battery pack assembly for ${b.serialNumber}.`);
@@ -829,6 +841,12 @@ export const InventoryView: React.FC = () => {
           metadata={qrData.metadata}
         />
       )}
+
+      <BatteryReportModal
+        isOpen={Boolean(reportBattery)}
+        onClose={() => setReportBattery(null)}
+        battery={reportBattery}
+      />
 
       {/* Receive BMS Batch Modal */}
       {showBmsModal && (
