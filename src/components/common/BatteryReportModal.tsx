@@ -1,5 +1,7 @@
-import React from 'react';
-import { Download, Printer, X } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import QRCode from 'qrcode';
+import { Download, X } from 'lucide-react';
+import logoImg from '../../assets/logo.png';
 import type { BatteryUnit, ModuleItem } from '../../types';
 
 interface BatteryReportModalProps {
@@ -62,317 +64,271 @@ export const BatteryReportModal: React.FC<BatteryReportModalProps> = ({ isOpen, 
   const controller = bmu || bms;
   const controllerName = bmu ? 'BMU' : bms ? 'BMS' : 'Controller';
   const cellRows = flattenCells(battery);
+  const qrPayload = battery.qrCode || `${battery.serialNumber}|BATTERY:${battery.id}`;
+  const [qrImageUrl, setQrImageUrl] = useState('');
 
-  const downloadReport = () => {
+  useEffect(() => {
+    void QRCode.toDataURL(qrPayload, {
+      width: 180,
+      margin: 1,
+      color: {
+        dark: '#111827',
+        light: '#ffffff',
+      },
+    }).then((url) => setQrImageUrl(url)).catch(() => setQrImageUrl(''));
+  }, [qrPayload]);
+
+  const downloadReport = async () => {
     const printable = document.getElementById('battery-report-printable');
     if (!printable) return;
-    const html = printable.outerHTML;
-    const blob = new Blob([html], { type: 'text/html' });
+
+    let logoDataUrl = '';
+    try {
+      const logoDataUrlPromise = new Promise<string>((resolve) => {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.naturalWidth || img.width;
+          canvas.height = img.naturalHeight || img.height;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(img, 0, 0);
+            resolve(canvas.toDataURL('image/png'));
+          } else {
+            resolve(logoImg);
+          }
+        };
+        img.onerror = () => resolve(logoImg);
+        img.src = logoImg;
+      });
+      logoDataUrl = await logoDataUrlPromise;
+    } catch {
+      logoDataUrl = logoImg;
+    }
+
+    let reportMarkup = printable.outerHTML;
+    const logoImgElement = printable.querySelector('img[alt="Power2Go Logo"]') as HTMLImageElement;
+    if (logoImgElement && logoDataUrl) {
+      const oldSrc = logoImgElement.src;
+      reportMarkup = reportMarkup.replace(new RegExp(`src="${oldSrc}"`, 'g'), `src="${logoDataUrl}"`)
+        .replace(/src="[^"]*logo\.png[^"]*"/g, `src="${logoDataUrl}"`);
+    }
+    const exportStyles = `
+      @page {
+        size: A4 portrait;
+        margin: 10mm 10mm 10mm 10mm;
+      }
+      html, body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: white;
+        color: #111827;
+        font-family: Inter, "Segoe UI", Arial, Helvetica, sans-serif;
+      }
+      body { 
+        display: block;
+        background: white;
+        width: 210mm;
+        margin: 0 auto;
+      }
+      * { box-sizing: border-box; }
+      .report-page {
+        width: 190mm;
+        max-width: 190mm;
+        margin: 0 auto;
+        background: #f3f3f1;
+        color: #1f1f1f;
+        box-shadow: none;
+        border: none;
+        overflow: visible;
+      }
+      .topbar {
+        position: relative;
+        padding: 12px 16px 8px 16px;
+        min-height: 60px;
+        background: linear-gradient(135deg, #1f1f1f 0%, #1f1f1f 65%, #272b2b 100%);
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        overflow: hidden;
+      }
+      .topbar::after {
+        content: "";
+        position: absolute;
+        right: -50px;
+        top: 0;
+        width: 300px;
+        height: 100%;
+        background: linear-gradient(135deg, #7CCB42 0%, #70C73D 35%, #4FA51D 100%);
+        clip-path: polygon(20% 0, 100% 0, 100% 100%, 0% 100%);
+      }
+      .brand { position: relative; z-index: 1; margin-top: 4px; }
+      .brand-logo {
+        display: block;
+        width: 120px;
+        max-width: 100%;
+        height: auto;
+      }
+      .brand-sub { display: block; margin-top: 2px; margin-left: 4px; font-size: 7px; letter-spacing: 1.5px; color: rgba(255,255,255,0.74); text-transform: uppercase; font-weight: 600; }
+      .topbar-meta { position: relative; z-index: 1; margin-top: 6px; font-size: 8px; color: #fff; text-align: right; line-height: 1.3; font-weight: 600; }
+      .report-body { background: #f3f3f1; padding: 6px 8px 6px; }
+      .report-header-row { display: flex; align-items: flex-end; justify-content: space-between; padding: 6px 4px 6px; border-bottom: 1px solid #d8d8d5; gap: 8px; }
+      .eyebrow { display: inline-block; font-size: 7px; letter-spacing: 1px; color: #6c6d6b; text-transform: uppercase; font-weight: 700; margin-bottom: 3px; }
+      .report-title { font-size: 14px; line-height: 1; margin: 0; font-weight: 800; color: #1f1f1f; }
+      .pack-box { min-width: 180px; background: rgba(255,255,255,0.4); border: 1px solid #d8d8d5; border-left: 3px solid #7ad148; padding: 6px 10px; }
+      .pack-box .label { display: block; font-size: 7px; letter-spacing: 1px; color: #7c7d78; text-transform: uppercase; font-weight: 700; margin-bottom: 3px; }
+      .pack-box .value { display: block; font-size: 12px; font-weight: 800; color: #1f1f1f; word-break: break-word; }
+      .summary-row { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0; border-bottom: 1px solid #d8d8d5; background: rgba(255,255,255,0.28); }
+      .summary-item { padding: 6px 8px; border-right: 1px solid #d8d8d5; }
+      .summary-item:last-child { border-right: none; }
+      .summary-item .label { display: block; margin-bottom: 2px; font-size: 7px; letter-spacing: 0.5px; text-transform: uppercase; color: #6c6d6b; font-weight: 700; }
+      .summary-item .value { display: flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 800; color: #1f1f1f; }
+      .summary-item .value .check { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border-radius: 50%; background: #dff5d4; border: 1px solid #7ad148; color: #2c7d11; font-size: 10px; font-weight: 800; }
+      .module-block { display: flex; margin-top: 6px; border: 1px solid #d9d9d6; background: rgba(255,255,255,0.2); break-inside: avoid; page-break-inside: avoid; }
+      .module-index { width: 45px; min-width: 45px; background: linear-gradient(180deg, #2f2f2d 0%, #1f1f1f 100%); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 800; letter-spacing: -1px; }
+      .module-content { flex: 1; padding: 6px 8px; background: rgba(255,255,255,0.2); }
+      .module-header-line { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; font-size: 8px; font-weight: 800; color: #1f1f1f; }
+      .module-header-line .module-name { font-size: 9px; }
+      .module-header-line .module-count { font-size: 7px; letter-spacing: 0.5px; color: #5f5f5d; text-transform: uppercase; }
+      .cell-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+      .cell-table th, .cell-table td { border-bottom: 1px solid #e2e2df; padding: 3px 4px; text-align: left; font-size: 8px; color: #202020; vertical-align: middle; word-break: break-word; overflow-wrap: anywhere; }
+      .cell-table th { background: rgba(255,255,255,0.2); font-size: 7px; letter-spacing: 0.5px; text-transform: uppercase; color: #666862; font-weight: 800; }
+      .cell-table tr:last-child td { border-bottom: none; }
+      .cell-grade { color: #2e8a2e; font-weight: 800; }
+      .electronic-box { margin-top: 6px; border: 1px solid #d9d9d6; background: rgba(255,255,255,0.2); display: flex; break-inside: avoid; page-break-inside: avoid; }
+      .electronic-box .electronic-index { width: 45px; min-width: 45px; background: linear-gradient(180deg, #2f2f2d 0%, #1f1f1f 100%); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 800; }
+      .electronic-box .electronic-content { flex: 1; padding: 6px 8px; }
+      .electronic-meta { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; margin-top: 4px; }
+      .electronic-meta .meta-item { font-size: 8px; color: #43453f; }
+      .electronic-meta .meta-item strong { display: block; font-size: 7px; font-weight: 800; letter-spacing: 0.5px; text-transform: uppercase; color: #666862; margin-bottom: 2px; }
+      .footer-strip { margin-top: 6px; background: linear-gradient(135deg, #292c2d 0%, #1f2123 100%); color: #f2f2f0; display: flex; justify-content: space-between; align-items: center; padding: 8px 10px 6px 12px; min-height: 45px; break-inside: avoid; page-break-inside: avoid; }
+      .scan-text { display: flex; align-items: center; gap: 6px; font-size: 8px; color: #f4f6f4; font-weight: 600; }
+      .scan-icon { width: 14px; height: 14px; border: 1px solid #f8c437; border-radius: 3px; position: relative; background: rgba(248, 196, 55, 0.12); }
+      .scan-icon::before, .scan-icon::after { content: ""; position: absolute; inset: 3px; border: 1px solid rgba(248, 196, 55, 0.7); }
+      .scan-icon::after { inset: 6px; }
+      .qr-box { width: 55px; height: 55px; background: #f4f4f4; border: 1px solid #d9d9d6; display: flex; align-items: center; justify-content: center; overflow: hidden; box-shadow: inset 0 0 0 4px #ffffff; }
+      .qr-box img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    `;
+
+    const exportHtml = `<!doctype html><html><head><meta charset="utf-8" /><title>${battery.serialNumber} Battery Report</title><style>${exportStyles}</style></head><body>${reportMarkup}</body></html>`;
+    const blob = new Blob([exportHtml], { type: 'text/html' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
     link.download = `${battery.serialNumber}_report.html`;
+    document.body.appendChild(link);
     link.click();
+    document.body.removeChild(link);
     URL.revokeObjectURL(url);
-  };
-
-  const printReport = () => {
-    const printable = document.getElementById('battery-report-printable');
-    if (!printable) return;
-
-    const printWindow = window.open('', '_blank', 'noopener,noreferrer,width=1200,height=900');
-    if (!printWindow) {
-      window.alert('Please allow pop-ups to save this report as PDF.');
-      return;
-    }
-
-    const printStyles = `
-      @page { size: A4 portrait; margin: 10mm; }
-      html, body {
-        margin: 0;
-        padding: 0;
-        background: #ffffff;
-        color: #2e2e2e;
-        font-family: 'Segoe UI', Arial, sans-serif;
-      }
-      body { display: block; }
-      .report-page {
-        width: 210mm;
-        min-height: 297mm;
-        margin: 0 auto;
-        background: #ffffff;
-        box-sizing: border-box;
-      }
-      .report-page .topbar {
-        position: relative;
-        height: 36mm;
-        background: linear-gradient(135deg, #2e2e2e 0%, #2e2e2e 55%, #2e2e2e 100%);
-        overflow: hidden;
-        padding: 0 12mm;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        border-bottom: 1px solid rgba(255,255,255,0.08);
-      }
-      .report-page .topbar::before {
-        content: "";
-        position: absolute;
-        inset: 0;
-        background-image: repeating-linear-gradient(115deg, rgba(255,255,255,0.025) 0 1px, transparent 1px 9px);
-        z-index: 0;
-      }
-      .report-page .topbar::after {
-        content: "";
-        position: absolute;
-        right: 0;
-        top: 0;
-        bottom: 0;
-        width: 95mm;
-        background: linear-gradient(160deg, #5CAE3A 0%, #5ea61a 60%, #3d7a10 100%);
-        clip-path: polygon(20% 0, 100% 0, 100% 100%, 0% 100%);
-        z-index: 1;
-        opacity: 0.9;
-      }
-      .report-page .brand,
-      .report-page .report-badge {
-        position: relative;
-        z-index: 2;
-      }
-      .report-page .brand {
-        display: flex;
-        flex-direction: column;
-        gap: 2.6mm;
-      }
-      .report-page .brand-mark {
-        font-size: 6.2pt;
-        letter-spacing: 2.5px;
-        text-transform: uppercase;
-        color: #c7cdc3;
-        font-weight: 600;
-      }
-      .report-page .brand-title {
-        font-size: 15pt;
-        font-weight: 700;
-        letter-spacing: -0.3px;
-        color: #ffffff;
-      }
-      .report-page .report-badge {
-        background: rgba(255,255,255,0.08);
-        border: 1px solid rgba(242,183,5,0.55);
-        color: #e6f7d9;
-        font-size: 7.5pt;
-        font-weight: 700;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-        padding: 1.8mm 3mm;
-        border-radius: 2px;
-      }
-      .report-page .title-band {
-        padding: 4mm 12mm 3mm;
-        display: flex;
-        align-items: flex-end;
-        justify-content: space-between;
-        border-bottom: 1.5px solid #2e2e2e;
-      }
-      .title-band .eyebrow {
-        font-size: 7.5pt;
-        letter-spacing: 2.5px;
-        color: #3d7a10;
-        font-weight: 600;
-        text-transform: uppercase;
-        margin-bottom: 3mm;
-      }
-      .title-band h2 {
-        font-size: 15pt;
-        font-weight: 700;
-        color: #2e2e2e;
-        letter-spacing: -0.3px;
-        margin: 0;
-      }
-      .title-band .doc-plate {
-        text-align: right;
-      }
-      .title-band .doc-plate .id-label {
-        display: block;
-        font-size: 6.5pt;
-        color: #8a939b;
-        letter-spacing: 1.5px;
-        text-transform: uppercase;
-        margin-bottom: 1.5mm;
-      }
-      .title-band .doc-plate .id {
-        display: inline-block;
-        background: #f4f6f3;
-        border: 1px solid #e1e4e0;
-        border-left: 4px solid #5ea61a;
-        padding: 3mm 5mm;
-        font-weight: 700;
-        font-size: 13pt;
-        color: #2e2e2e;
-      }
-      .report-page .summary-strip {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 0;
-        background: #f4f6f3;
-        border-bottom: 1px solid #e1e4e0;
-        padding: 2.5mm 12mm;
-      }
-      .summary-strip .stat {
-        padding: 0 6mm;
-        border-right: 1px solid #e1e4e0;
-      }
-      .summary-strip .stat:last-child { border-right: none; }
-      .summary-strip .stat-label {
-        display: block;
-        font-size: 6.3pt;
-        letter-spacing: 1.3px;
-        text-transform: uppercase;
-        color: #8a939b;
-        font-weight: 600;
-        margin-bottom: 1.3mm;
-      }
-      .summary-strip .stat-value {
-        font-size: 12pt;
-        font-weight: 700;
-        color: #2e2e2e;
-      }
-      .summary-strip .stat-value.accent { color: #3d7a10; }
-      .report-page .report-grid {
-        padding: 20px 12mm 0;
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 16px;
-      }
-      .report-page .panel {
-        background: #ffffff;
-        border: 1px solid #e5e7eb;
-        border-radius: 12px;
-        padding: 16px 18px;
-      }
-      .report-page .panel h3 {
-        font-size: 11px;
-        font-weight: 800;
-        letter-spacing: 1.5px;
-        text-transform: uppercase;
-        color: #4b5563;
-        margin: 0 0 12px;
-      }
-      .report-page .kv {
-        display: grid;
-        grid-template-columns: 1fr auto;
-        gap: 8px 12px;
-        font-size: 12px;
-        color: #334155;
-      }
-      .report-page .kv span:nth-child(odd) {
-        color: #64748b;
-        font-weight: 600;
-      }
-      .report-page .module-grid {
-        padding: 20px 12mm 16px;
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-        gap: 16px;
-      }
-      .report-page .module-card {
-        border: 1px solid #dfe8e0;
-        background: linear-gradient(180deg, #f9fff9 0%, #ffffff 100%);
-        border-radius: 12px;
-        padding: 14px;
-      }
-      .report-page .module-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 10px;
-      }
-      .report-page .module-name {
-        font-weight: 800;
-        color: #0f172a;
-        font-size: 12px;
-      }
-      .report-page .module-status {
-        background: #ecfdf5;
-        color: #047857;
-        border: 1px solid #bbf7d0;
-        border-radius: 999px;
-        padding: 5px 8px;
-        font-size: 9px;
-        font-weight: 800;
-        letter-spacing: 1px;
-        text-transform: uppercase;
-      }
-      .report-page .module-list {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 6px;
-      }
-      .report-page .cell-tag {
-        background: #f8fafc;
-        border: 1px solid #dbe2ea;
-        border-radius: 8px;
-        padding: 6px 8px;
-        font-size: 10px;
-        font-weight: 700;
-        color: #334155;
-      }
-      .report-page .report-table-wrap { padding: 0 12mm 24px; }
-      .report-page .report-table {
-        width: 100%;
-        border-collapse: collapse;
-        border: 1px solid #dfe5de;
-        table-layout: fixed;
-      }
-      .report-page .report-table th,
-      .report-page .report-table td {
-        border-bottom: 1px solid #e5e7eb;
-        padding: 8px 8px;
-        text-align: left;
-        vertical-align: top;
-        font-size: 10px;
-        line-height: 1.35;
-        word-break: break-word;
-      }
-      .report-page .report-table th {
-        background: #f8fafc;
-        color: #475569;
-        font-size: 8.5pt;
-        letter-spacing: 1.3px;
-        text-transform: uppercase;
-        font-weight: 800;
-      }
-      .report-page .report-table tbody tr:nth-child(even) { background: #fcfdfd; }
-    `;
-
-    printWindow.document.write(`<!doctype html><html><head><meta charset="utf-8" /><title>${battery.serialNumber} Battery Report</title><style>${printStyles}</style></head><body>${printable.outerHTML}</body></html>`);
-    printWindow.document.close();
-    printWindow.focus();
-
-    setTimeout(() => {
-      printWindow.print();
-      printWindow.close();
-    }, 500);
   };
 
   return (
     <div className="battery-report-modal fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 backdrop-blur-xs p-4">
       <style>{`
+        @page {
+          size: A4 portrait;
+          margin: 10mm;
+        }
+
         @media print {
-          body {
-            background: #d9d9d9 !important;
+          html, body {
+            width: 210mm;
+            height: 297mm;
+            margin: 0;
+            padding: 0;
+            background: white;
           }
+
+          body * {
+            overflow: visible !important;
+          }
+
+          .battery-report-modal {
+            position: static !important;
+            inset: auto !important;
+            width: 210mm !important;
+            height: auto !important;
+            max-height: none !important;
+            overflow: visible !important;
+            background: white !important;
+            padding: 0 !important;
+            display: block !important;
+            margin: 0 !important;
+          }
+
           .battery-report-modal .report-header-actions {
             display: none !important;
           }
+
           .battery-report-modal .report-shell {
+            width: 210mm !important;
+            max-width: 210mm !important;
+            max-height: none !important;
+            height: auto !important;
+            overflow: visible !important;
             box-shadow: none !important;
             border: none !important;
             margin: 0 !important;
+            border-radius: 0 !important;
+            background: white !important;
           }
-          @page {
-            size: A4 portrait;
-            margin: 7mm;
+
+          .report-page {
+            width: 190mm !important;
+            max-width: 190mm !important;
+            min-height: auto !important;
+            height: auto !important;
+            max-height: none !important;
+            overflow: visible !important;
+            box-shadow: none !important;
+            margin: 0 auto !important;
+            break-inside: auto !important;
+            page-break-inside: auto !important;
+            background: white !important;
+          }
+
+          .report-page *,
+          .report-page .module-block,
+          .report-page .electronic-box,
+          .report-page .footer-strip,
+          .report-page .summary-row,
+          .report-page .cell-table,
+          .report-page .cell-table tr,
+          .report-page .cell-table th,
+          .report-page .cell-table td {
+            overflow: visible !important;
+            break-inside: auto !important;
+            page-break-inside: auto !important;
+          }
+
+          .report-page .module-block,
+          .report-page .electronic-box,
+          .report-page .footer-strip {
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+          }
+
+          .report-page .cell-table {
+            width: 100% !important;
+            table-layout: fixed !important;
+          }
+
+          .report-page .cell-table thead {
+            display: table-header-group !important;
+          }
+
+          .report-page .cell-table tr {
+            break-inside: avoid !important;
+            page-break-inside: avoid !important;
+          }
+
+          .report-page .cell-table td,
+          .report-page .cell-table th {
+            word-break: break-word !important;
+            overflow-wrap: anywhere !important;
           }
         }
 
@@ -382,7 +338,7 @@ export const BatteryReportModal: React.FC<BatteryReportModalProps> = ({ isOpen, 
         }
 
         .battery-report-modal .report-shell {
-          width: min(980px, 100%);
+          width: min(960px, 100%);
           max-height: 92vh;
           overflow: auto;
           background: #ffffff;
@@ -392,8 +348,8 @@ export const BatteryReportModal: React.FC<BatteryReportModalProps> = ({ isOpen, 
 
         .report-page {
           width: 100%;
-          max-width: 980px;
-          min-height: 1000px;
+          max-width: 950px;
+          min-height: auto;
           margin: 0 auto;
           background: #f5f5f3;
           color: #1f1f1f;
@@ -428,17 +384,11 @@ export const BatteryReportModal: React.FC<BatteryReportModalProps> = ({ isOpen, 
           margin-top: 10px;
         }
 
-        .report-page .brand-mark {
+        .report-page .brand-logo {
           display: block;
-          font-size: 62px;
-          line-height: 0.9;
-          font-weight: 900;
-          letter-spacing: -4px;
-          color: #fff;
-        }
-
-        .report-page .brand-mark .green {
-          color: #8ddd49;
+          width: 210px;
+          max-width: 100%;
+          height: auto;
         }
 
         .report-page .brand-sub {
@@ -745,30 +695,22 @@ export const BatteryReportModal: React.FC<BatteryReportModalProps> = ({ isOpen, 
         }
 
         .report-page .qr-box {
-          width: 70px;
-          height: 70px;
+          width: 78px;
+          height: 78px;
           background: #f4f4f4;
           border: 1px solid #d9d9d6;
-          position: relative;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          overflow: hidden;
           box-shadow: inset 0 0 0 6px #ffffff;
         }
 
-        .report-page .qr-box::before,
-        .report-page .qr-box::after {
-          content: "";
-          position: absolute;
-          inset: 10px;
-          border: 2px solid #1f1f1f;
-          background:
-            linear-gradient(#1f1f1f 0 0) 0 0 / 6px 6px no-repeat,
-            linear-gradient(#1f1f1f 0 0) 0 100% / 6px 6px no-repeat,
-            linear-gradient(#1f1f1f 0 0) 100% 0 / 6px 6px no-repeat,
-            linear-gradient(#1f1f1f 0 0) 100% 100% / 6px 6px no-repeat,
-            linear-gradient(#1f1f1f 0 0) 50% 50% / 10px 10px no-repeat;
-        }
-
-        .report-page .qr-box::after {
-          inset: 22px;
+        .report-page .qr-box img {
+          width: 100%;
+          height: 100%;
+          object-fit: contain;
+          display: block;
         }
       `}</style>
 
@@ -776,7 +718,7 @@ export const BatteryReportModal: React.FC<BatteryReportModalProps> = ({ isOpen, 
         <div id="battery-report-printable" className="report-page">
           <div className="topbar">
             <div className="brand">
-              <span className="brand-mark">POWER<span className="green">2GO</span></span>
+              <img src={logoImg} alt="Power2Go Logo" className="brand-logo" />
               <span className="brand-sub">Energy Storage Systems</span>
             </div>
             <div className="topbar-meta">
@@ -880,7 +822,9 @@ export const BatteryReportModal: React.FC<BatteryReportModalProps> = ({ isOpen, 
                 <span className="scan-icon" aria-hidden="true" />
                 Scan the QR code to download the digital PDF copy
               </div>
-              <div className="qr-box" aria-label="QR code placeholder" />
+              <div className="qr-box" aria-label="Battery QR code">
+                {qrImageUrl ? <img src={qrImageUrl} alt="Battery QR code" /> : null}
+              </div>
             </div>
           </div>
         </div>
@@ -890,18 +834,10 @@ export const BatteryReportModal: React.FC<BatteryReportModalProps> = ({ isOpen, 
         <button
           type="button"
           onClick={downloadReport}
-          className="px-4 py-2 border border-slate-200 bg-slate-50 text-slate-700 rounded-xl text-xs font-bold hover:bg-slate-100 flex items-center gap-1.5"
-        >
-          <Download className="w-4 h-4" />
-          Save HTML
-        </button>
-        <button
-          type="button"
-          onClick={printReport}
           className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center gap-1.5"
         >
-          <Printer className="w-4 h-4" />
-          Print / Save as PDF
+          <Download className="w-4 h-4" />
+          Export Reports
         </button>
         <button
           type="button"

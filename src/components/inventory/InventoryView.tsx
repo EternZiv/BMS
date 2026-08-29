@@ -794,7 +794,7 @@ export const InventoryView: React.FC = () => {
                           setReportBattery(b);
                         }}
                         className="p-1.5 text-slate-500 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors"
-                        title="Generate battery report"
+                        title="Export reports"
                       >
                         <Download className="w-4 h-4" />
                       </button>
