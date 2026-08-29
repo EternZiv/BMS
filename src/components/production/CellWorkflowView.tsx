@@ -3,6 +3,7 @@ import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
 import { api } from '../../services/api';
 import { BatteryUnit, CellItem, ProductTemplate } from '../../types';
+import { sortCellsForWorkflow } from '../../lib/cellOrdering';
 import {
   CheckCircle2,
   AlertTriangle,
@@ -72,27 +73,15 @@ export const CellWorkflowView: React.FC = () => {
       setBattery(res.battery);
       setProduct(res.product);
 
-      // Flatten cells from all modules in predictable physical order
+      // Flatten only the cells assigned to physical module slots while preserving builder slot order.
       const allCells: CellItem[] = [];
       res.battery.modules.forEach(m => {
-        m.cells.forEach(c => allCells.push(c));
+        (m.cells || []).forEach(c => {
+          allCells.push(c);
+        });
       });
 
-      // If no modules have cells yet, check reserved cells
-      if (allCells.length === 0) {
-        const invCells = await api.getCells();
-        const reserved = invCells.filter(c => c.reservedForBatteryId === id);
-        allCells.push(...reserved);
-      }
-
-      allCells.sort((a, b) => {
-        if ((a.assignedToModuleId || '') === (b.assignedToModuleId || '')) {
-          return (a.moduleSlotIndex ?? 0) - (b.moduleSlotIndex ?? 0);
-        }
-        return (a.assignedToModuleId || '').localeCompare(b.assignedToModuleId || '');
-      });
-
-      setCells(allCells);
+      setCells(sortCellsForWorkflow(allCells, res.battery.modules));
 
       // Initialize OCV/IR input states prefilled with supplier or existing production values
       const initialOcvIr: Record<string, { ocv: string; ir: string }> = {};
@@ -178,6 +167,11 @@ export const CellWorkflowView: React.FC = () => {
   // Submit OCV / IR and Continue to Grading
   const handleContinueToGrading = async () => {
     if (!battery) return;
+    const userId = currentUser?.id;
+    if (!userId) {
+      addNotification('error', 'User Required', 'Please sign in to continue.');
+      return;
+    }
     setSubmitting(true);
 
     try {
@@ -195,7 +189,7 @@ export const CellWorkflowView: React.FC = () => {
       });
 
       // Call backend API to persist all values and transition state
-      const res = await api.bulkSaveCellOcvIr(battery.id, measurements, currentUser.id);
+      const res = await api.bulkSaveCellOcvIr(battery.id, measurements, userId);
 
       setCurrentPhase('GRADING');
       addNotification('success', 'OCV / IR Verified', `All ${cells.length} cells recorded. Proceeding to Grading.`);
@@ -222,6 +216,11 @@ export const CellWorkflowView: React.FC = () => {
   // Submit Grading and Continue to Damage History
   const handleContinueToDamageHistory = async () => {
     if (!battery) return;
+    const userId = currentUser?.id;
+    if (!userId) {
+      addNotification('error', 'User Required', 'Please sign in to continue.');
+      return;
+    }
     setSubmitting(true);
 
     try {
@@ -234,7 +233,7 @@ export const CellWorkflowView: React.FC = () => {
         };
       });
 
-      const res = await api.bulkSaveCellGrading(battery.id, grades, currentUser.id);
+      const res = await api.bulkSaveCellGrading(battery.id, grades, userId);
 
       setCurrentPhase('DAMAGE_HISTORY');
       addNotification('success', 'Cell Grading Logged', `Cell grading saved. Proceeding to Damage History.`);
@@ -262,6 +261,11 @@ export const CellWorkflowView: React.FC = () => {
   // Submit Damage History and Continue to Module Workflow
   const handleContinueToModuleWorkflow = async () => {
     if (!battery) return;
+    const userId = currentUser?.id;
+    if (!userId) {
+      addNotification('error', 'User Required', 'Please sign in to continue.');
+      return;
+    }
     setSubmitting(true);
 
     try {
@@ -275,7 +279,7 @@ export const CellWorkflowView: React.FC = () => {
         };
       });
 
-      const res = await api.bulkSaveDamageHistory(battery.id, items, currentUser.id);
+      const res = await api.bulkSaveDamageHistory(battery.id, items, userId);
 
       setBattery(res.battery);
       addNotification('success', 'Cell Workflow Complete', 'All cell testing, grading, and damage checks completed.');

@@ -542,9 +542,10 @@ apiRouter.get('/dashboard/stats', (req, res) => {
   const machines = Array.from(db.machines.values());
 
   const isAssigned = (c: CellItem) => Boolean(c.assignedToModuleId || c.reservedForBatteryId || c.reservedForOrderId);
-  const isUsed = (c: CellItem) => isAssigned(c) || c.status !== 'AVAILABLE';
+  const activeProductionStatuses = new Set(['RESERVED', 'MODULE_ASSIGNED', 'SCANNED', 'ASSEMBLED', 'IN_PROCESS', 'VALIDATING', 'TESTING', 'PASSED']);
+  const isUsed = (c: CellItem) => isAssigned(c) || activeProductionStatuses.has(c.status || '');
   const usedCells = cells.filter(isUsed).length;
-  const availableCells = Math.max(0, cells.length - usedCells);
+  const availableCells = cells.filter(c => c.status === 'AVAILABLE' && !c.reservedForBatteryId && !c.reservedForOrderId).length;
   const reservedCells = cells.filter(c =>
     !isAssigned(c) && (c.status === 'RESERVED' || ((c.reservedForOrderId || c.reservedForBatteryId) && c.status !== 'QUARANTINED' && c.status !== 'ASSEMBLED'))
   ).length;

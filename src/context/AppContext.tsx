@@ -91,6 +91,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       timestamp: new Date().toLocaleTimeString(),
     };
     setNotifications(prev => [newNotif, ...prev.slice(0, 9)]);
+    window.setTimeout(() => {
+      dismissNotification(newNotif.id);
+    }, 5000);
   };
 
   const dismissNotification = (id: string) => {

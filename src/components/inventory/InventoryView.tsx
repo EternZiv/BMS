@@ -24,7 +24,7 @@ import {
 type Tab = 'CELLS' | 'BMS' | 'BMU' | 'MODULES' | 'BATTERIES';
 
 export const InventoryView: React.FC = () => {
-  const { setActiveView, setQuickSearchQuery, refreshKey, addNotification, triggerRefresh, inventoryTab, setInventoryTab } = useApp();
+  const { setActiveView, setActiveBatteryId, setQuickSearchQuery, refreshKey, addNotification, triggerRefresh, inventoryTab, setInventoryTab } = useApp();
   const activeTab = inventoryTab;
   const setActiveTab = setInventoryTab;
   const [search, setSearch] = useState('');
@@ -180,17 +180,22 @@ export const InventoryView: React.FC = () => {
   };
 
   const filteredCells = cells.filter(c => {
+    const internalSerial = (c.internalSerial || '').toLowerCase();
+    const supplierBarcode = (c.supplierBarcode || '').toLowerCase();
+    const supplierName = (c.supplierName || '').toLowerCase();
     const matchesSearch =
       !search ||
-      c.internalSerial.toLowerCase().includes(search.toLowerCase()) ||
-      c.supplierBarcode.toLowerCase().includes(search.toLowerCase()) ||
-      c.supplierName.toLowerCase().includes(search.toLowerCase());
-        const matchesStatus = !statusFilter ||
-          (statusFilter === 'DAMAGE'
-            ? ['QUARANTINED', 'FAILED'].includes(c.status) || ['DAMAGED', 'FAILED'].includes(c.productionGrade || c.supplierGrade || '') || Boolean(c.quarantineReason)
-            : statusFilter === 'IN_PROCESS'
-              ? ['IN_PROCESS', 'VALIDATING', 'TESTING', 'SCANNED', 'PASSED', 'ASSEMBLED'].includes(c.status)
-              : c.status === statusFilter);
+      internalSerial.includes(search.toLowerCase()) ||
+      supplierBarcode.includes(search.toLowerCase()) ||
+      supplierName.includes(search.toLowerCase());
+    const matchesStatus = !statusFilter ||
+      (statusFilter === 'DAMAGE'
+        ? ['QUARANTINED', 'FAILED'].includes(c.status) || ['DAMAGED', 'FAILED'].includes(c.productionGrade || c.supplierGrade || '') || Boolean(c.quarantineReason)
+        : statusFilter === 'IN_PROCESS'
+          ? ['IN_PROCESS', 'VALIDATING', 'TESTING', 'SCANNED', 'PASSED', 'ASSEMBLED'].includes(c.status)
+          : statusFilter === 'NON_AVAILABLE'
+            ? !['AVAILABLE', 'OCV_TESTED', 'GRADED'].includes(c.status) || Boolean(c.reservedForOrderId || c.reservedForBatteryId)
+            : c.status === statusFilter);
     return matchesSearch && matchesStatus;
   });
 
@@ -271,8 +276,10 @@ export const InventoryView: React.FC = () => {
             <option value="">All Statuses</option>
             {activeTab === 'CELLS' ? (
               <>
+                <option value="AVAILABLE">AVAILABLE</option>
                 <option value="RESERVED">RESERVED</option>
                 <option value="IN_PROCESS">IN PROCESS</option>
+                <option value="NON_AVAILABLE">NON AVAILABLE</option>
                 <option value="DAMAGE">DAMAGED</option>
               </>
             ) : (
@@ -780,14 +787,13 @@ export const InventoryView: React.FC = () => {
                         <Eye className="w-4 h-4" />
                       </button>
                       <button
-                        onClick={async () => {
-                          const status = window.prompt('Battery status', b.status);
-                          if (!status || status === b.status) return;
-                          try { await api.updateBattery(b.id, { status }); triggerRefresh(); }
-                          catch (err: any) { addNotification('error', 'Update Failed', err.message); }
+                        onClick={() => {
+                          setActiveBatteryId(b.id);
+                          setActiveView('workflow-pack');
+                          addNotification('info', 'Battery Assembly Opened', `Opening auto battery pack assembly for ${b.serialNumber}.`);
                         }}
                         className="p-1.5 text-slate-500 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors"
-                        title="Update battery"
+                        title="Open battery assembly"
                       >
                         <Pencil className="w-4 h-4" />
                       </button>

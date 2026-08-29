@@ -655,7 +655,8 @@ begin
     select jsonb_build_object(
         'inventory', jsonb_build_object(
             'totalCells', (select count(*) from public.cells),
-            'availableCells', (select count(*) from public.cells where reserved_for_order_id is null and reserved_for_battery_id is null and status <> 'QUARANTINED'),
+            'availableCells', (select count(*) from public.cells where status in ('AVAILABLE', 'OCV_TESTED', 'GRADED') and reserved_for_order_id is null and reserved_for_battery_id is null),
+            'usedCells', (select count(*) from public.cells where (reserved_for_order_id is not null or reserved_for_battery_id is not null) or status in ('RESERVED','MODULE_ASSIGNED','SCANNED','ASSEMBLED','IN_PROCESS','VALIDATING','TESTING','PASSED')),
             'reservedCells', (select count(*) from public.cells where reserved_for_order_id is not null or reserved_for_battery_id is not null),
             'quarantinedCells', (select count(*) from public.cells where status = 'QUARANTINED'),
             'finishedBatteries', (select count(*) from public.batteries where status in ('FINISHED', 'RELEASED', 'DISPATCHED')),
@@ -778,7 +779,8 @@ $$ language plpgsql security definer;
 create or replace function public.create_production_order_transaction(
     p_product_id text,
     p_quantity integer,
-    p_order_number text
+    p_order_number text,
+    p_battery_serial_prefix text default null
 ) returns jsonb as $$
 declare
     v_order_id text;
@@ -794,10 +796,13 @@ declare
     v_product_model text;
     v_battery_name text;
     v_voltage_type text;
+    v_capacity_kwh numeric;
     v_serial_base text;
     v_production_period text;
+    v_capacity_suffix text;
     v_next_battery_number integer;
     v_next_module_number integer;
+    v_serial_override text;
     v_num_modules integer;
     v_cells_per_module integer;
     v_total_cells_per_battery integer;
@@ -806,8 +811,8 @@ declare
     j integer;
     v_cell_slice_ids text[];
 begin
-    select serial_prefix, product_model, battery_name, voltage_type, num_modules, cells_per_module, total_cells
-    into v_serial_prefix, v_product_model, v_battery_name, v_voltage_type, v_num_modules, v_cells_per_module, v_total_cells_per_battery
+    select serial_prefix, product_model, battery_name, voltage_type, capacity_kwh, num_modules, cells_per_module, total_cells
+    into v_serial_prefix, v_product_model, v_battery_name, v_voltage_type, v_capacity_kwh, v_num_modules, v_cells_per_module, v_total_cells_per_battery
     from public.product_templates
     where id = p_product_id and active = true;
 
@@ -823,13 +828,28 @@ begin
     if v_product_model = '' then
         raise exception 'Product template % must specify a product model', p_product_id;
     end if;
-    v_production_period := to_char(current_date, 'YYMM');
-    v_serial_base := 'P2G-' || v_product_model || '-' || v_production_period;
+    v_production_period := to_char(current_date, 'DDMM');
+    v_capacity_suffix := regexp_replace(regexp_replace(trim(to_char(coalesce(v_capacity_kwh, 5), 'FM99990.99')), '0+$', '', 'g'), '\.$', '', 'g');
+    v_serial_override := trim(coalesce(p_battery_serial_prefix, ''));
+    if v_serial_override <> '' then
+        if v_serial_override ~ '-[0-9]{1,6}$' then
+            v_serial_base := regexp_replace(v_serial_override, '-[0-9]{1,6}$', '');
+            v_next_battery_number := coalesce((substring(v_serial_override from '([0-9]+)$'))::integer, 0);
+        else
+            v_serial_base := v_serial_override;
+            v_next_battery_number := 0;
+        end if;
+    else
+        v_serial_base := 'P2G-' || v_product_model || '-' || v_production_period;
+        v_next_battery_number := 0;
+    end if;
     perform pg_advisory_xact_lock(hashtext('P2G-battery-serials'));
-    select coalesce(max((substring(serial_number from '([0-9]+)$'))::integer), 0) + 1
-    into v_next_battery_number
-    from public.batteries
-    where serial_number ~ '^P2G-[A-Z0-9.]+-[0-9]{4}-[0-9]{6}$';
+    if v_serial_override = '' then
+        select coalesce(max((substring(serial_number from '([0-9]+)$'))::integer), 0) + 1
+        into v_next_battery_number
+        from public.batteries
+        where serial_number ~ '^P2G-[A-Z0-9.]+-[0-9]{4}-[0-9]{6}$';
+    end if;
     perform pg_advisory_xact_lock(hashtext('mod-global')); 
     select coalesce(max((substring(serial_number from '([0-9]+)$'))::integer), 0) + 1
     into v_next_module_number
@@ -1060,20 +1080,82 @@ create or replace function public.move_cell_transaction(
 ) returns void as $$
 declare
     v_source_module_id text;
+    v_source_slot integer;
+    v_target_cell_id text;
+    v_target_module_id text;
+    v_target_slot integer;
 begin
-    if exists (select 1 from public.module_cells where module_id = p_target_module_id and cell_slot_index = p_target_slot) then
-        raise exception 'Target slot is already occupied';
+    if p_target_module_id is null then
+        raise exception 'Target module is required';
     end if;
 
-    select module_id into v_source_module_id from public.module_cells where cell_id = p_cell_id for update;
-    delete from public.module_cells where cell_id = p_cell_id;
+    select module_id, cell_slot_index into v_source_module_id, v_source_slot
+    from public.module_cells
+    where cell_id = p_cell_id
+    for update;
 
-    insert into public.module_cells (module_id, cell_id, cell_slot_index)
-    values (p_target_module_id, p_cell_id, p_target_slot);
+    if v_source_module_id is null then
+        raise exception 'Cell not assigned to a module';
+    end if;
+
+    if v_source_module_id = p_target_module_id and v_source_slot = p_target_slot then
+        return;
+    end if;
+
+    select module_id, cell_id, cell_slot_index
+      into v_target_module_id, v_target_cell_id, v_target_slot
+    from public.module_cells
+    where module_id = p_target_module_id
+      and cell_slot_index = p_target_slot
+      and cell_id <> p_cell_id
+    for update;
+
+    if v_target_cell_id is not null then
+        if v_source_module_id = p_target_module_id then
+            update public.module_cells
+            set cell_slot_index = -1
+            where cell_id = v_target_cell_id;
+
+            update public.module_cells
+            set cell_slot_index = p_target_slot
+            where cell_id = p_cell_id;
+
+            update public.module_cells
+            set cell_slot_index = v_source_slot
+            where cell_id = v_target_cell_id;
+        else
+            update public.module_cells
+            set cell_slot_index = -1
+            where cell_id = v_target_cell_id;
+
+            update public.module_cells
+            set module_id = p_target_module_id,
+                cell_slot_index = p_target_slot
+            where cell_id = p_cell_id;
+
+            update public.module_cells
+            set module_id = v_source_module_id,
+                cell_slot_index = v_source_slot
+            where cell_id = v_target_cell_id;
+        end if;
+    else
+        update public.module_cells
+        set module_id = p_target_module_id,
+            cell_slot_index = p_target_slot
+        where cell_id = p_cell_id;
+    end if;
 
     insert into public.audit_logs (entity_type, entity_id, action, actor, result, details)
-    values ('CELL', p_cell_id, 'MOVE_CELL', coalesce(auth.uid()::text, 'SYSTEM'), 'SUCCESS', 
-        'Moved cell from module ' || coalesce(v_source_module_id, 'NONE') || ' to module ' || p_target_module_id || ' slot ' || p_target_slot);
+    values (
+        'CELL',
+        p_cell_id,
+        'MOVE_CELL',
+        coalesce(auth.uid()::text, 'SYSTEM'),
+        'SUCCESS',
+        'Moved cell from module ' || coalesce(v_source_module_id, 'NONE') || ' slot ' || coalesce(v_source_slot::text, 'NONE') ||
+        ' to module ' || p_target_module_id || ' slot ' || p_target_slot ||
+        case when v_target_cell_id is not null then ' and swapped with cell ' || v_target_cell_id else '' end
+    );
 end;
 $$ language plpgsql security definer;
 

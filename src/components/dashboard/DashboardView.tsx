@@ -76,7 +76,7 @@ export const DashboardView: React.FC = () => {
 
   const handleEditWipBattery = (battery: any) => {
     setActiveBatteryId(battery.id);
-    setActiveView('production');
+    setActiveView('workflow-pack');
   };
 
   if (loadError) {

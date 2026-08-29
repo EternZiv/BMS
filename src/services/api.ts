@@ -66,6 +66,10 @@ function toAppValue(value: any): any {
   return Object.fromEntries(Object.entries(value).map(([key, child]) => [toAppColumn(key), toAppValue(child)]));
 }
 
+function mergeReservedBatteryCells(modules: any[], reservedCells: any[], batteryId: string): any[] {
+  return Array.isArray(modules) ? modules : [];
+}
+
 function mapQueryValue(method: string, value: any, index: number) {
   if (typeof value !== 'string') return value;
   if (method === 'eq' || method === 'neq' || method === 'in' || method === 'ilike') {
@@ -279,15 +283,20 @@ async getUsers(): Promise<User[]> {
     const totalCells = inventoryCells.length;
     const reservedCells = inventoryCells.filter(cell => cell.reservedForOrderId || cell.reservedForBatteryId).length;
     const quarantinedCells = inventoryCells.filter(cell => cell.status === 'QUARANTINED').length;
+    const usedCells = inventoryCells.filter(cell => {
+      if (cell.reservedForOrderId || cell.reservedForBatteryId) return true;
+      return ['RESERVED', 'MODULE_ASSIGNED', 'SCANNED', 'ASSEMBLED', 'IN_PROCESS', 'VALIDATING', 'TESTING', 'PASSED']
+        .includes(cell.status || '');
+    }).length;
     const availableCells = inventoryCells.filter(cell =>
-      !cell.reservedForOrderId && !cell.reservedForBatteryId && cell.status !== 'QUARANTINED',
+      ['AVAILABLE', 'OCV_TESTED', 'GRADED'].includes(cell.status || '') && !cell.reservedForOrderId && !cell.reservedForBatteryId,
     ).length;
     const inventorySummary = {
       ...(data?.inventory || {}),
       totalCells,
       availableCells,
       reservedCells,
-      usedCells: reservedCells,
+      usedCells,
       quarantinedCells,
     };
     
@@ -304,7 +313,7 @@ async getUsers(): Promise<User[]> {
         ...data.kpis,
         totalCellsInInventory: totalCells,
         availableCells,
-        usedCells: reservedCells,
+        usedCells,
         reservedCells,
         quarantinedCells,
       } : {
@@ -542,19 +551,24 @@ async getUsers(): Promise<User[]> {
     const pageSize = 1000;
     const requestedLimit = params?.limit && params.limit > 0 ? params.limit : undefined;
     const cells: CellItem[] = [];
+    const seen = new Set<string>();
 
     for (let offset = 0; requestedLimit === undefined || cells.length < requestedLimit; offset += pageSize) {
       let query = supabase.from('cells').select('*');
 
       if (params?.status) {
-        query = query.eq('status', params.status);
+        if (params.status === 'AVAILABLE') {
+          query = query.in('status', ['AVAILABLE', 'OCV_TESTED', 'GRADED']);
+        } else {
+          query = query.eq('status', params.status);
+        }
       }
       if (params?.usedOnly === true) {
-        query = query.not('reservedForBatteryId', 'is', null);
+        query = query.or('reservedForBatteryId.not.is.null,reservedForOrderId.not.is.null');
       }
       if (params?.search && typeof params.search === 'string') {
         const q = params.search.toLowerCase();
-        query = query.or(`internalSerial.ilike.%${q}%,supplierBarcode.ilike.%${q}%,supplierName.ilike.%${q}%,palletNumber.ilike.%${q}%,boxNumber.ilike.%${q}%`);
+        query = query.or(`internal_serial.ilike.%${q}%,supplier_barcode.ilike.%${q}%,pallet_number.ilike.%${q}%,box_number.ilike.%${q}%`);
       }
 
       const end = requestedLimit === undefined
@@ -563,7 +577,12 @@ async getUsers(): Promise<User[]> {
       const { data, error } = await query.order('created_at', { ascending: false }).range(offset, end);
       if (error) throw error;
       const page = (data || []) as CellItem[];
-      cells.push(...page);
+      for (const cell of page) {
+        const key = String(cell.id || cell.internalSerial || cell.supplierBarcode || `${cell.palletNumber}-${cell.boxNumber}`);
+        if (key && seen.has(key)) continue;
+        if (key) seen.add(key);
+        cells.push(cell);
+      }
       if (page.length < pageSize) break;
     }
 
@@ -796,6 +815,7 @@ async getUsers(): Promise<User[]> {
     productId: string;
     quantity: number;
     orderNumber?: string;
+    batterySerialBase?: string;
     userId?: string; cellId?: string; grade?: string; remarks?: string;
   }): Promise<{ order: ProductionOrder; batteryIds: string[] }> {
     if (!Number.isInteger(data.quantity) || data.quantity < 1) {
@@ -806,6 +826,7 @@ async getUsers(): Promise<User[]> {
       p_product_id: data.productId,
       p_quantity: data.quantity,
       p_order_number: data.orderNumber || null,
+      p_battery_serial_prefix: data.batterySerialBase || null,
     });
     if (transactionError) throw transactionError;
     const mappedTransaction = toAppValue(transactionResult || {});
@@ -1048,6 +1069,7 @@ async getUsers(): Promise<User[]> {
         cells: assignmentsByModule.get(module.id) || module.cells || [],
       }));
     }
+
     return {
       battery: {
         ...battery,
@@ -1246,18 +1268,41 @@ async getUsers(): Promise<User[]> {
     return toAppValue(data);
   },
 
-  async moveCell(batteryId: string, sourceModuleIndex: number, sourceCellSlotIndex: number, targetModuleIndex: number, targetCellSlotIndex: number): Promise<void> {
-    const modulesSnapshot = await supabase.from('batteries').select('modules').eq('id', batteryId).single();
-    const modules = Array.isArray(modulesSnapshot.data?.modules) ? modulesSnapshot.data.modules : [];
-    const source = modules.find((module: any) => module.moduleIndex === sourceModuleIndex);
-    const target = modules.find((module: any) => module.moduleIndex === targetModuleIndex);
-    const cell = source?.cells?.find((item: any) => item.moduleSlotIndex === sourceCellSlotIndex);
-    if (!target || !cell) throw new Error('The selected cell or target module does not exist.');
+  async moveCell(batteryId: string, sourceModuleIndex: number, sourceCellSlotIndex: number, targetModuleIndex: number, targetCellSlotIndex: number, explicitCellId?: string): Promise<void> {
     if (!rawSupabase) throw new Error('Supabase is not configured.');
+
+    const { data: modules, error: modulesError } = await supabase
+      .from('modules')
+      .select('*')
+      .eq('batteryId', batteryId)
+      .order('moduleIndex', { ascending: true });
+    if (modulesError) throw modulesError;
+
+    const moduleIds = (modules || []).map((module: any) => module.id);
+    const { data: assignments, error: assignmentError } = moduleIds.length > 0
+      ? await supabase
+          .from('module_cells')
+          .select('moduleId, cellId, cellSlotIndex')
+          .in('moduleId', moduleIds)
+          .order('cellSlotIndex', { ascending: true })
+      : { data: [], error: null };
+    if (assignmentError) throw assignmentError;
+
+    const sourceModule = (modules || []).find((module: any) => module.moduleIndex === sourceModuleIndex);
+    const targetModule = (modules || []).find((module: any) => module.moduleIndex === targetModuleIndex);
+
+    const sourceAssignment = explicitCellId
+      ? (assignments || []).find((assignment: any) => assignment.cellId === explicitCellId)
+      : (assignments || []).find((assignment: any) => assignment.moduleId === sourceModule?.id && assignment.cellSlotIndex === sourceCellSlotIndex);
+
+    if (!sourceModule || !targetModule || !sourceAssignment) {
+      throw new Error('The selected cell or target module does not exist.');
+    }
+
     const { error: moveError } = await rawSupabase.rpc('move_cell_transaction', {
       p_battery_id: batteryId,
-      p_cell_id: cell.id,
-      p_target_module_id: target.id,
+      p_cell_id: sourceAssignment.cellId,
+      p_target_module_id: targetModule.id,
       p_target_slot: targetCellSlotIndex,
     });
     if (moveError) throw moveError;

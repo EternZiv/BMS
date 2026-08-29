@@ -26,6 +26,7 @@ export const VisualBatteryBuilder: React.FC = () => {
   const [manufacturer, setManufacturer] = useState('');
   const [batchNumber, setBatchNumber] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
+  const [draggedCell, setDraggedCell] = useState<{ moduleIndex: number; cellSlotIndex: number; cellId: string } | null>(null);
 
   useEffect(() => {
     loadBatteries();
@@ -197,24 +198,26 @@ export const VisualBatteryBuilder: React.FC = () => {
     openScannerForSlot(componentType);
   };
 
-  const handleMoveCell = async (moduleIndex: number, cellSlotIndex: number) => {
+  const handleMoveCell = async (moduleIndex: number, cellSlotIndex: number, targetModuleIndex?: number, targetCellSlotIndex?: number, cellId?: string) => {
     if (!data) return;
-    const destination = window.prompt('Move cell to module and slot (example: 2,4)');
-    if (!destination) return;
-    const [moduleText, slotText] = destination.split(',').map(value => value.trim());
-    const targetModuleIndex = Number(moduleText) - 1;
-    const targetCellSlotIndex = Number(slotText) - 1;
-    if (!Number.isInteger(targetModuleIndex) || !Number.isInteger(targetCellSlotIndex)
-      || targetModuleIndex < 0 || targetModuleIndex >= data.product.numModules
-      || targetCellSlotIndex < 0 || targetCellSlotIndex >= data.product.cellsPerModule) {
-      addNotification('error', 'Invalid Destination', 'Use the format module,slot such as 2,4.');
+
+    const resolvedTargetModuleIndex = targetModuleIndex ?? moduleIndex;
+    const resolvedTargetCellSlotIndex = targetCellSlotIndex ?? cellSlotIndex;
+
+    if (resolvedTargetModuleIndex === moduleIndex && resolvedTargetCellSlotIndex === cellSlotIndex) {
+      return;
+    }
+
+    if (resolvedTargetModuleIndex < 0 || resolvedTargetModuleIndex >= data.product.numModules || resolvedTargetCellSlotIndex < 0 || resolvedTargetCellSlotIndex >= data.product.cellsPerModule) {
+      addNotification('error', 'Invalid Destination', 'Choose an empty slot within the battery layout.');
       return;
     }
 
     setActionLoading(true);
     try {
-      await api.moveCell(data.battery.id, moduleIndex, cellSlotIndex, targetModuleIndex, targetCellSlotIndex);
-      addNotification('success', 'Cell Moved', `Cell moved to Module ${targetModuleIndex + 1}, Slot ${targetCellSlotIndex + 1}.`);
+      await api.moveCell(data.battery.id, moduleIndex, cellSlotIndex, resolvedTargetModuleIndex, resolvedTargetCellSlotIndex, cellId);
+      addNotification('success', 'Cell Moved', `Cell moved to Module ${resolvedTargetModuleIndex + 1}, Slot ${resolvedTargetCellSlotIndex + 1}.`);
+      setDraggedCell(null);
       triggerRefresh();
     } catch (err: any) {
       addNotification('error', 'Move Failed', err.message);
@@ -280,10 +283,13 @@ export const VisualBatteryBuilder: React.FC = () => {
   const assignedController = battery.bms ?? battery.bmu;
   const assignedControllerType = battery.bms ? 'BMS' : battery.bmu ? 'BMU' : 'BMS/BMU';
   const bmsScanned = !!assignedController;
-  const allCellsScanned = (battery.modules || []).every(m => (m.cells || []).length === product.cellsPerModule);
+  const allCellsScanned = (battery.modules || []).every((m) => {
+    const assignedCellCount = (m.cells || []).filter((cell: any) => Number.isInteger(cell?.moduleSlotIndex) && cell.moduleSlotIndex >= 0).length;
+    return assignedCellCount === product.cellsPerModule;
+  });
   const isComplete = (!bmsRequired || bmsScanned) && allCellsScanned;
 
-    const handleContinue = async () => {
+  const handleContinue = async () => {
     try {
       if (battery.currentStep === 'CELL_IDENTIFICATION') {
         await api.executeStep(battery.id, 'CELL_IDENTIFICATION', { mode: 'AUTO', userId: currentUser?.id });
@@ -417,11 +423,27 @@ export const VisualBatteryBuilder: React.FC = () => {
                       return (
                         <div
                           key={cIdx}
+                          draggable={Boolean(cell)}
+                          onDragStart={(event) => {
+                            if (!cell) return;
+                            setDraggedCell({ moduleIndex: mIdx, cellSlotIndex: cIdx, cellId: cell.id });
+                            event.dataTransfer.effectAllowed = 'move';
+                            event.dataTransfer.setData('text/plain', `${mIdx}:${cIdx}:${cell.id}`);
+                          }}
+                          onDragEnd={() => setDraggedCell(null)}
+                          onDragOver={(event) => {
+                            event.preventDefault();
+                          }}
+                          onDrop={(event) => {
+                            event.preventDefault();
+                            if (!draggedCell) return;
+                            void handleMoveCell(draggedCell.moduleIndex, draggedCell.cellSlotIndex, mIdx, cIdx, draggedCell.cellId);
+                          }}
                           className={`relative aspect-square rounded-lg border-2 flex flex-col items-center justify-center p-1 transition-all ${
                             cell
-                              ? 'bg-emerald-50 border-emerald-500 cursor-default'
+                              ? 'bg-emerald-50 border-emerald-500 cursor-grab active:cursor-grabbing'
                               : 'bg-slate-50 border-slate-200 border-dashed'
-                          }`}
+                          } ${draggedCell ? 'ring-2 ring-emerald-300' : ''}`}
                         >
                           {cell ? (
                             <>
@@ -443,17 +465,6 @@ export const VisualBatteryBuilder: React.FC = () => {
                             >
                               <Pencil className="h-2.5 w-2.5" />
                             </button>
-                            {cell && (
-                              <button
-                                type="button"
-                                onClick={() => void handleMoveCell(mIdx, cIdx)}
-                                className="rounded-md border border-slate-300 bg-white p-1 text-slate-600 hover:bg-slate-50"
-                                title="Move cell"
-                                aria-label={`Move cell from slot ${cIdx + 1}`}
-                              >
-                                <Move className="h-2.5 w-2.5" />
-                              </button>
-                            )}
                           </div>
                         </div>
                       );
@@ -465,11 +476,10 @@ export const VisualBatteryBuilder: React.FC = () => {
           </div>
         </div>
 
-        {/* Continue Button */}
         {isComplete && (
-          <div className="flex justify-end pt-4">
+          <div className="flex justify-end pt-2">
             <button
-              onClick={handleContinue}
+              onClick={() => void handleContinue()}
               className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl shadow-xs transition-colors flex items-center space-x-2"
             >
               <span>CONTINUE TO OCV / IR</span>
