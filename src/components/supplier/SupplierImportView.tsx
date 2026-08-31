@@ -49,6 +49,12 @@ export const SupplierImportView: React.FC = () => {
   const [headersFound, setHeadersFound] = useState<Record<string, boolean>>({});
   const [previewMode, setPreviewMode] = useState(false);
 
+  // Battery Batch Import State
+  const [batteryImportFileName, setBatteryImportFileName] = useState('');
+  const [batteryParsedRows, setBatteryParsedRows] = useState<Array<{ index: number; batterySerialNumber: string; bmuSerialNumber?: string; isValid: boolean; errors: string[] }>>([]);
+  const [batteryPreviewMode, setBatteryPreviewMode] = useState(false);
+  const [batteryImportResult, setBatteryImportResult] = useState<any>(null);
+
   useEffect(() => {
     loadData();
   }, [refreshKey]);
@@ -213,6 +219,189 @@ export const SupplierImportView: React.FC = () => {
     }
   };
 
+  const handleBatteryFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const data = reader.result;
+        if (!data) throw new Error('No spreadsheet content was loaded.');
+
+        const workbook = XLSX.read(data, { type: 'binary', cellDates: true });
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false }) as Record<string, any>[];
+
+        const findValue = (row: Record<string, any>, ...keys: string[]) => {
+          const normalizedLookup = Object.fromEntries(
+            Object.entries(row).map(([key, value]) => {
+              const normalized = String(key).toLowerCase().trim().replace(/\s+/g, ' ');
+              return [normalized, value];
+            })
+          );
+
+          for (const key of keys) {
+            const normalized = String(key).toLowerCase().trim().replace(/\s+/g, ' ');
+            const val = normalizedLookup[normalized];
+            if (val !== undefined && val !== null && String(val).trim() !== '') {
+              return String(val).trim();
+            }
+          }
+          
+          for (const key of keys) {
+            const keyword = String(key).toLowerCase().trim();
+            for (const [headerKey, headerVal] of Object.entries(normalizedLookup)) {
+              if (headerKey.includes(keyword) && headerVal !== undefined && headerVal !== null && String(headerVal).trim() !== '') {
+                return String(headerVal).trim();
+              }
+            }
+          }
+          
+          return '';
+        };
+
+        // Parse grouped structure: cells (QR), modules, batteries, BMUs
+        const batteryGroups: Map<string, { bmuSerial: string; qrCodes: string[]; firstRowIndex: number }> = new Map();
+        let currentBatteryMarker = '';
+        let currentBmu = '';
+        let currentCells: string[] = [];
+        let firstRowIndexForBattery = 2;
+
+        for (let i = 0; i < rawRows.length; i++) {
+          const row = rawRows[i];
+          const qrCode = findValue(row, 'qr', 'qr code', 'qrcode', 'cell qr');
+          const batteryMarker = findValue(row, 'battery', 'battery serial', 'battery_no', 'battery_number');
+          const bmuSerial = findValue(row, 'bmu', 'bmu serial', 'bmu_no', 'controller');
+
+          // When we see a new battery marker
+          if (batteryMarker && batteryMarker !== currentBatteryMarker) {
+            // Save the PREVIOUS battery group (if exists)
+            if (currentBatteryMarker && currentCells.length > 0) {
+              batteryGroups.set(`battery_${currentBatteryMarker}`, {
+                bmuSerial: currentBmu,
+                qrCodes: currentCells,
+                firstRowIndex: firstRowIndexForBattery,
+              });
+            }
+            // Start new battery
+            currentBatteryMarker = batteryMarker;
+            currentBmu = bmuSerial;
+            firstRowIndexForBattery = i + 2;
+            currentCells = qrCode ? [qrCode] : [];
+          } else if (qrCode) {
+            // Keep accumulating cells for current battery
+            currentCells.push(qrCode);
+          }
+        }
+
+        // Save the LAST battery group
+        if (currentBatteryMarker && currentCells.length > 0) {
+          batteryGroups.set(`battery_${currentBatteryMarker}`, {
+            bmuSerial: currentBmu,
+            qrCodes: currentCells,
+            firstRowIndex: firstRowIndexForBattery,
+          });
+        }
+
+        if (batteryGroups.size === 0) {
+          throw new Error('No battery groups were found in the spreadsheet.');
+        }
+
+        // Generate battery serials for each group
+        const now = new Date();
+        const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, '0')}`;
+        
+        const normalizedRows = Array.from(batteryGroups.entries()).map((entry, index) => {
+          const bmuSerial = entry[1].bmuSerial;
+          const batterySerialNumber = `P2G-7K5-${yymm}-${String(index + 1).padStart(6, '0')}`;
+
+          return {
+            index: entry[1].firstRowIndex,
+            batterySerialNumber,
+            bmuSerialNumber: bmuSerial,
+            qrCodeValue: entry[1].qrCodes.length > 0 ? entry[1].qrCodes[0] : '',
+            cellCount: entry[1].qrCodes.length,
+            isValid: true,
+            errors: [] as string[],
+          };
+        });
+
+        setBatteryParsedRows(normalizedRows);
+        setBatteryImportFileName(file.name);
+        setBatteryPreviewMode(true);
+        addNotification('success', 'Battery Excel Parsed', `Loaded ${normalizedRows.length} batteries with generated serials (${normalizedRows.reduce((sum, r) => sum + r.cellCount, 0)} total cells).`);
+      } catch (err: any) {
+        addNotification('error', 'Battery File Parse Failed', err.message);
+      } finally {
+        if (e.target) e.target.value = '';
+      }
+    };
+    reader.readAsBinaryString(file);
+  };
+
+  const confirmBatteryImport = async () => {
+    const payloadRows = batteryParsedRows.filter(row => row.isValid).map(row => ({
+      batterySerialNumber: row.batterySerialNumber,
+      bmuSerialNumber: row.bmuSerialNumber,
+    }));
+
+    if (payloadRows.length === 0) {
+      addNotification('error', 'No valid battery rows', 'Upload a valid battery file with at least one battery serial number.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const result = await api.bulkInitializeBatteryBatch({
+        rows: payloadRows,
+        userId: currentUser.id,
+      });
+
+      setBatteryImportResult(result);
+      addNotification(
+        'success',
+        'Battery Batch Validated',
+        `Validated ${result.batchSize} batteries for ${result.template.name}. Required ${result.order.requiredCells} cells and ${result.order.requiredBmUs} BMUs.`
+      );
+      setBatteryPreviewMode(false);
+      triggerRefresh();
+    } catch (err: any) {
+      addNotification('error', 'Battery Batch Import Failed', err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const createBatteryBatch = async () => {
+    if (!batteryImportResult) {
+      addNotification('error', 'No batch to create', 'Please validate a battery batch first.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const result = await api.createBulkBatteryBatch({
+        batchPlan: batteryImportResult,
+        userId: currentUser.id,
+      });
+
+      addNotification(
+        'success',
+        'Production Batch Created',
+        `Created ${result.batteryCount} batteries with ${result.cellsAllocated} cells. Production Order: ${result.productionOrderId}`
+      );
+      setBatteryImportResult(null);
+      setBatteryPreviewMode(false);
+      setBatteryParsedRows([]);
+      triggerRefresh();
+    } catch (err: any) {
+      addNotification('error', 'Batch Creation Failed', err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const allHeadersFound = Object.values(headersFound).every(Boolean);
 
   return (
@@ -245,6 +434,141 @@ export const SupplierImportView: React.FC = () => {
             <FileSpreadsheet className="w-10 h-10 text-emerald-500 mx-auto mb-2 opacity-80" />
             <p className="text-xs font-bold text-slate-800">Drag & Drop Excel / CSV Manifest</p>
             <p className="text-[11px] text-slate-400 mt-1">Extracts canonical 10 columns strictly.</p>
+          </div>
+        </div>
+      )}
+
+      {!batteryPreviewMode && !batteryImportResult && (
+        <div className="bg-white rounded-2xl shadow-xs border border-slate-200 p-6 space-y-5">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-sm font-bold text-slate-900">Battery Batch Upload</h2>
+            <span className="text-[10px] uppercase tracking-wider text-slate-500">Existing stock allocation</span>
+          </div>
+
+          <div className="border-2 border-dashed border-slate-200 rounded-2xl p-7 text-center relative hover:border-emerald-500">
+            <input
+              type="file"
+              accept=".csv,.xlsx,.xls"
+              onChange={handleBatteryFileUpload}
+              className="absolute inset-0 opacity-0 cursor-pointer"
+            />
+            <Boxes className="w-10 h-10 text-emerald-500 mx-auto mb-2 opacity-80" />
+            <p className="text-xs font-bold text-slate-800">Upload Battery Excel / CSV</p>
+            <p className="text-[11px] text-slate-400 mt-1">Primary identifier is the Battery serial column; BMU is optional. Uses imported BMUs/cells already in stock.</p>
+          </div>
+        </div>
+      )}
+
+      {batteryPreviewMode && (
+        <div className="bg-white rounded-2xl shadow-xs border border-slate-200 p-6 space-y-5">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-sm font-bold text-slate-900">Battery Batch Validation</h2>
+            <button
+              type="button"
+              onClick={() => setBatteryPreviewMode(false)}
+              className="text-[11px] px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-600"
+            >
+              Close
+            </button>
+          </div>
+
+          <div className="grid grid-cols-4 gap-4 text-center border-y border-slate-100 py-3">
+            <div><span className="block text-xl font-black text-slate-900">{batteryParsedRows.length}</span><span className="text-xs text-slate-500">Total Batteries</span></div>
+            <div><span className="block text-xl font-black text-emerald-600">{batteryParsedRows.filter(r => r.isValid).length}</span><span className="text-xs text-slate-500">Valid</span></div>
+            <div><span className="block text-xl font-black text-slate-900">{batteryParsedRows.reduce((sum, r) => sum + (r.cellCount || 0), 0)}</span><span className="text-xs text-slate-500">Total Cells</span></div>
+            <div><span className="block text-xl font-black text-sky-600">{batteryParsedRows.length > 0 ? Math.round(batteryParsedRows.reduce((sum, r) => sum + (r.cellCount || 0), 0) / batteryParsedRows.length) : 0}</span><span className="text-xs text-slate-500">Cells/Battery</span></div>
+          </div>
+
+          <div className="max-h-[250px] overflow-auto border border-slate-200 rounded">
+            <table className="w-full text-left text-[11px]">
+              <thead className="bg-slate-50 text-slate-500 sticky top-0">
+                <tr>
+                  <th className="px-3 py-2">Battery #</th>
+                  <th className="px-3 py-2">Generated Serial</th>
+                  <th className="px-3 py-2">Cells</th>
+                  <th className="px-3 py-2">BMU Serial</th>
+                  <th className="px-3 py-2">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {batteryParsedRows.map((row, idx) => (
+                  <tr key={`${row.index}-${row.batterySerialNumber}`} className="border-t border-slate-100">
+                    <td className="px-3 py-2 text-center font-bold text-slate-900">{idx + 1}</td>
+                    <td className="px-3 py-2 font-mono text-xs">{row.batterySerialNumber}</td>
+                    <td className="px-3 py-2 text-center">{row.cellCount}</td>
+                    <td className="px-3 py-2 font-mono text-xs">{row.bmuSerialNumber || '—'}</td>
+                    <td className="px-3 py-2">
+                      <span className={`inline-flex rounded-full px-2 py-1 text-[10px] font-bold ${row.isValid ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-800 text-white'}`}>
+                        {row.isValid ? 'VALID' : 'INVALID'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex justify-end">
+            <button
+              type="button"
+              onClick={confirmBatteryImport}
+              disabled={loading || batteryParsedRows.filter(row => row.isValid).length === 0}
+              className="px-4 py-2 bg-emerald-600 text-white text-xs font-bold rounded-xl disabled:opacity-50"
+            >
+              {loading ? 'Validating...' : 'Validate & Prepare Batch'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {batteryImportResult && (
+        <div className="bg-white rounded-2xl shadow-xs border border-slate-200 p-6 space-y-5">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-sm font-bold text-slate-900">Battery Batch Result</h2>
+            <button
+              type="button"
+              onClick={() => setBatteryImportResult(null)}
+              className="text-[11px] px-2.5 py-1.5 rounded-lg border border-slate-200 text-slate-600"
+            >
+              Close
+            </button>
+          </div>
+
+          <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="text-slate-500">Total batteries</div>
+              <div className="mt-1 text-lg font-black text-slate-900">{batteryImportResult.batchSize}</div>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="text-slate-500">Template</div>
+              <div className="mt-1 text-sm font-bold text-slate-900">{batteryImportResult.template?.name || '—'}</div>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="text-slate-500">Cells required</div>
+              <div className="mt-1 text-lg font-black text-slate-900">{batteryImportResult.order?.requiredCells || 0}</div>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <div className="text-slate-500">BMUs required</div>
+              <div className="mt-1 text-lg font-black text-slate-900">{batteryImportResult.order?.requiredBmUs || 0}</div>
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={() => setBatteryImportResult(null)}
+              className="px-4 py-2.5 bg-slate-100 text-slate-700 text-xs font-bold rounded-xl hover:bg-slate-200"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={createBatteryBatch}
+              disabled={loading}
+              className="px-4 py-2.5 bg-emerald-600 text-white text-xs font-bold rounded-xl disabled:opacity-50 hover:bg-emerald-700"
+            >
+              {loading ? 'Creating Batch...' : 'Create Production Batch'}
+            </button>
           </div>
         </div>
       )}

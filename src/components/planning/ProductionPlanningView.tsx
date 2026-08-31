@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import * as XLSX from 'xlsx';
 import { useApp } from '../../context/AppContext';
 import { useAuth } from '../../context/AuthContext';
 import { api } from '../../services/api';
@@ -35,6 +36,9 @@ export const ProductionPlanningView: React.FC = () => {
   const [quantity, setQuantity] = useState<number>(1);
   const [batterySerialBase, setBatterySerialBase] = useState<string>('');
   const [submitting, setSubmitting] = useState(false);
+  const [bulkImportRows, setBulkImportRows] = useState<Array<{ batterySerialNumber?: string; bmuSerialNumber?: string }>>([]);
+  const [bulkImportFileName, setBulkImportFileName] = useState('');
+  const [bulkImporting, setBulkImporting] = useState(false);
 
   // Cancel Confirmation Modal State
   const [cancelTarget, setCancelTarget] = useState<{ id: string; orderNumber: string } | null>(null);
@@ -90,6 +94,90 @@ export const ProductionPlanningView: React.FC = () => {
       setBatterySerialBase(defaultBatterySerialBase(selectedProduct));
     }
   }, [selectedProductId, selectedProduct]);
+
+  const handleBulkBatteryFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const data = reader.result;
+        if (!data) throw new Error('No spreadsheet content was loaded.');
+
+        const workbook = XLSX.read(data, { type: 'binary', cellDates: true });
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' }) as Record<string, any>[];
+
+        const normalizedRows = rows
+          .map(row => {
+            const candidates = [
+              row.batterySerialNumber,
+              row.battery_serial_number,
+              row.batterySerial,
+              row['Battery Serial Number'],
+              row['Battery Serial'],
+              row.serial_number,
+              row.serial,
+              row.battery,
+            ];
+            const bmuCandidates = [
+              row.bmuSerialNumber,
+              row.bmu_serial_number,
+              row.bmuSerial,
+              row['BMU Serial Number'],
+              row['BMU Serial'],
+              row.bmu,
+            ];
+            const batterySerialNumber = candidates.find(value => value !== undefined && value !== null && String(value).trim()) || '';
+            const bmuSerialNumber = bmuCandidates.find(value => value !== undefined && value !== null && String(value).trim()) || '';
+            return {
+              batterySerialNumber: String(batterySerialNumber).trim(),
+              bmuSerialNumber: String(bmuSerialNumber).trim(),
+            };
+          })
+          .filter(row => row.batterySerialNumber || row.bmuSerialNumber);
+
+        if (normalizedRows.length === 0) {
+          throw new Error('No battery rows were found in the uploaded file. Expected battery serial and optional BMU serial columns.');
+        }
+
+        setBulkImportRows(normalizedRows);
+        setBulkImportFileName(file.name);
+        addNotification('success', 'Excel Parsed', `Loaded ${normalizedRows.length} battery rows for validation.`);
+      } catch (err: any) {
+        addNotification('error', 'Bulk Excel Parse Failed', err.message);
+      } finally {
+        if (event.target) event.target.value = '';
+      }
+    };
+    reader.readAsBinaryString(file);
+  };
+
+  const handleBulkBatteryInitialize = async () => {
+    if (bulkImportRows.length === 0) {
+      addNotification('error', 'No rows to initialize', 'Upload a spreadsheet with battery serials first.');
+      return;
+    }
+
+    setBulkImporting(true);
+    try {
+      const result = await api.bulkInitializeBatteryBatch({
+        rows: bulkImportRows,
+        productId: selectedProductId,
+        userId: currentUser.id,
+      });
+
+      addNotification('success', 'Bulk Initialization Ready', `Validated ${result.batchSize} batteries using ${result.template.name}. Required ${result.order.requiredCells} cells and ${result.order.requiredBmUs} BMUs.`);
+      setBulkImportRows([]);
+      setBulkImportFileName('');
+      triggerRefresh();
+    } catch (err: any) {
+      addNotification('error', 'Bulk Initialization Failed', err.message);
+    } finally {
+      setBulkImporting(false);
+    }
+  };
 
   const handleCreateOrder = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -170,6 +258,39 @@ export const ProductionPlanningView: React.FC = () => {
           <Plus className="w-4 h-4" />
           <span>New Production Order</span>
         </button>
+      </div>
+
+      <div className="bg-white rounded-2xl shadow-xs border border-slate-200 p-5">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-bold text-slate-900">Bulk Battery Initialization</h2>
+            <p className="text-xs text-slate-500 mt-1">Upload an Excel file containing battery serials and optional BMU serials to validate stock and prepare the batch.</p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <label className="cursor-pointer inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-900 text-white text-xs font-semibold">
+              <Plus className="w-3.5 h-3.5" />
+              Upload Excel
+              <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleBulkBatteryFileUpload} />
+            </label>
+            {bulkImportRows.length > 0 && (
+              <button
+                onClick={handleBulkBatteryInitialize}
+                disabled={bulkImporting}
+                className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-xs font-bold disabled:opacity-60"
+              >
+                {bulkImporting ? 'Validating...' : `Initialize ${bulkImportRows.length} Batteries`}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {bulkImportFileName && (
+          <div className="mt-3 flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            <span>{bulkImportFileName}</span>
+            <span>{bulkImportRows.length} rows loaded</span>
+          </div>
+        )}
       </div>
 
       {/* Inventory Health Summary Bar */}

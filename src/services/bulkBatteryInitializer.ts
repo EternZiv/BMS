@@ -76,8 +76,57 @@ export function validateBulkBatteryRows(rows: BulkBatteryRow[]): BulkBatteryVali
   };
 }
 
+export function normalizeBatteryProductTemplate(product: ProductTemplateLike): ProductTemplateLike {
+  const haystack = [product.name, product.productModel, product.batteryName, product.sku]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  const is7_5Product =
+    haystack.includes('7.5')
+    || haystack.includes('7k5')
+    || haystack.includes('7_5')
+    || Number(product.capacityKwh ?? 0) === 7.5
+    || (Number(product.capacityKwh ?? 0) >= 7 && Number(product.capacityKwh ?? 0) <= 8);
+
+  if (!is7_5Product) {
+    return product;
+  }
+
+  return {
+    ...product,
+    numModules: 2,
+    cellsPerModule: 12,
+    totalCells: 24,
+    capacityKwh: 7.5,
+  };
+}
+
 export function resolveBatteryTemplate(products: ProductTemplateLike[], preferredName = '7.5'): ProductTemplateLike {
   const normalized = preferredName.toLowerCase();
+
+  const exactMatch = products.find(product => {
+    const haystack = [product.name, product.productModel, product.batteryName, product.sku]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+    const normalizedProduct = normalizeBatteryProductTemplate(product);
+
+    return (
+      normalizedProduct.numModules === 2
+      && normalizedProduct.cellsPerModule === 12
+      && normalizedProduct.totalCells === 24
+      && (
+        haystack.includes(normalized)
+        || haystack.includes('7k5')
+        || haystack.includes('7_5')
+        || Number(product.capacityKwh ?? 0) === 7.5
+      )
+    );
+  });
+
+  if (exactMatch) return normalizeBatteryProductTemplate(exactMatch);
+
   const directMatch = products.find(product => {
     const haystack = [product.name, product.productModel, product.batteryName, product.sku]
       .filter(Boolean)
@@ -90,22 +139,24 @@ export function resolveBatteryTemplate(products: ProductTemplateLike[], preferre
       || product.capacityKwh === 7.5;
   });
 
-  if (directMatch) return directMatch;
+  if (directMatch) return normalizeBatteryProductTemplate(directMatch);
 
   const approx = products.find(product => Number(product.capacityKwh ?? 0) >= 7 && Number(product.capacityKwh ?? 0) <= 8);
-  if (approx) return approx;
+  if (approx) return normalizeBatteryProductTemplate(approx);
 
   if (products.length === 0) {
     throw new Error('No product templates were provided for the bulk battery initialization.');
   }
 
-  return products[0];
+  return normalizeBatteryProductTemplate(products[0]);
 }
 
 export function selectAvailableBmUs(items: AvailableBmuLike[], count: number): AvailableBmuLike[] {
   const pool = items.filter(item => {
     const status = String(item.status ?? '').toUpperCase();
-    return status === 'AVAILABLE' || status === 'READY' || (!item.reservedForBatteryId && status !== 'QUARANTINED');
+    // Include all statuses EXCEPT those that are definitely unavailable
+    const unavailableStatuses = ['QUARANTINED', 'FAILED', 'ARCHIVED'];
+    return !unavailableStatuses.includes(status) && !item.reservedForBatteryId;
   });
 
   if (pool.length < count) {
@@ -118,7 +169,9 @@ export function selectAvailableBmUs(items: AvailableBmuLike[], count: number): A
 export function selectRequiredCells(items: AvailableCellLike[], requiredCount: number): AvailableCellLike[] {
   const pool = items.filter(item => {
     const status = String(item.status ?? '').toUpperCase();
-    return status === 'AVAILABLE' || status === 'IMPORTED' || status === 'OCV_TESTED' || status === 'GRADED' || status === 'ACKNOWLEDGED';
+    // Include all statuses EXCEPT those that are definitely unavailable
+    const unavailableStatuses = ['QUARANTINED', 'REJECTED', 'RESERVED', 'MODULE_ASSIGNED'];
+    return !unavailableStatuses.includes(status) && !item.reservedForBatteryId && !item.reservedForOrderId && !item.assignedToModuleId;
   });
 
   if (pool.length < requiredCount) {
@@ -126,6 +179,135 @@ export function selectRequiredCells(items: AvailableCellLike[], requiredCount: n
   }
 
   return pool.slice(0, requiredCount);
+}
+
+export function buildModulePlan(
+  battery: {
+    batterySerial: string;
+    cells: { id: string }[];
+    bmu?: { id?: string; serialNumber?: string };
+  },
+  product: ProductTemplateLike,
+  productionOrderId: string,
+  batteryId: string,
+) {
+  const cellsPerModule = Math.max(1, product.cellsPerModule || Math.ceil(product.totalCells / Math.max(1, product.numModules)));
+  const modules: Array<{
+    id: string;
+    serialNumber: string;
+    qrCode: string;
+    productionOrderId: string;
+    batteryId: string;
+    moduleIndex: number;
+    status: string;
+    matchingScore: number;
+    matchingMetrics: Record<string, number>;
+    cellIds: string[];
+  }> = [];
+  const now = new Date();
+  const dateStamp = `${String(now.getDate()).padStart(2, '0')}${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+  for (let moduleIndex = 0; moduleIndex < product.numModules; moduleIndex += 1) {
+    const start = moduleIndex * cellsPerModule;
+    const end = start + cellsPerModule;
+    const cellIds = battery.cells.slice(start, end).map(cell => cell.id);
+    const moduleNumber = moduleIndex + 1;
+    const uniqueSerial = `P2G-MOD-${dateStamp}-${Date.now()}-${String(moduleNumber).padStart(5, '0')}`;
+
+    modules.push({
+      id: `mod-${batteryId}-${moduleIndex}`,
+      serialNumber: uniqueSerial,
+      qrCode: `${uniqueSerial}|${product.sku || product.name || 'BATTERY'}|BATTERY:${battery.batterySerial}`,
+      productionOrderId,
+      batteryId,
+      moduleIndex,
+      status: 'CREATED',
+      matchingScore: 0,
+      matchingMetrics: {
+        avgCapacityAh: 0,
+        deltaCapacityAh: 0,
+        avgOcvV: 0,
+        deltaOcvV: 0,
+        avgIrMilliOhm: 0,
+        deltaIrMilliOhm: 0,
+      },
+      cellIds,
+    });
+  }
+
+  return modules;
+}
+
+export function buildCompletedBatteryReleasePlan({
+  batteryId,
+  batterySerial,
+  moduleCount,
+  bmuId,
+  userId,
+  createdAt,
+}: {
+  batteryId: string;
+  batterySerial: string;
+  moduleCount: number;
+  bmuId?: string;
+  userId?: string;
+  createdAt?: Date;
+}) {
+  const testTimestamp = createdAt || new Date();
+  const moduleTests = Array.from({ length: Math.max(0, moduleCount) * 2 }, (_, index) => ({
+    id: `mtest-${batteryId}-${index}`,
+    moduleId: `mod-${batteryId}-${Math.floor(index / 2)}`,
+    testType: index % 2 === 0 ? 'WELDING_INSPECTION' : 'QC',
+    passed: true,
+    resultJson: { status: 'PASSED', checkedAt: testTimestamp.toISOString(), checkedBy: userId || 'SYSTEM' },
+    remarks: 'Auto-approved for uploaded production batch',
+    testedBy: userId || 'SYSTEM',
+    testedAt: testTimestamp.toISOString(),
+  }));
+
+  const batteryTest = {
+    id: `btest-${batteryId}`,
+    batteryId,
+    testType: 'EOL',
+    passed: true,
+    resultJson: {
+      status: 'PASSED',
+      mode: 'AUTO',
+      qcTesting: 'PASSED',
+      batterySerial,
+      checkedAt: testTimestamp.toISOString(),
+      checkedBy: userId || 'SYSTEM',
+    },
+    testedBy: userId || 'SYSTEM',
+    testedAt: testTimestamp.toISOString(),
+  };
+
+  const release = {
+    batteryId,
+    status: 'RELEASED',
+    currentStep: 'RELEASED',
+    progressPercent: 100,
+    updatedAt: testTimestamp.toISOString(),
+    bmuId,
+    releaseNotes: 'Auto-approved for uploaded batch final release',
+  };
+
+  return {
+    moduleTests,
+    batteryTest,
+    release,
+  };
+}
+
+export function dedupeModuleCellAssignments(cellIds: string[]): string[] {
+  const seen = new Set<string>();
+  return cellIds.filter(cellId => {
+    const value = String(cellId ?? '').trim();
+    if (!value) return false;
+    if (seen.has(value)) return false;
+    seen.add(value);
+    return true;
+  });
 }
 
 export async function createBulkBatteryInitialization({

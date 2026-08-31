@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validateBulkBatteryRows } from './bulkBatteryInitializer';
+import { buildCompletedBatteryReleasePlan, buildModulePlan, dedupeModuleCellAssignments, normalizeBatteryProductTemplate, validateBulkBatteryRows } from './bulkBatteryInitializer';
 
 test('bulk battery rows validate unique serial numbers and required field mapping', () => {
   const rows = [
@@ -31,4 +31,58 @@ test('bulk battery rows reject duplicate battery serials', () => {
   assert.equal(result.valid, false);
   assert.deepEqual(result.duplicates, ['P2G-7K5-2409-000001']);
   assert.match(result.errors.join(' '), /Duplicate battery serial/i);
+});
+
+test('bulk module plan creates 2 modules with 12 cells each for a 7.5 kWh battery', () => {
+  const originalProduct = {
+    id: 'prod-1',
+    name: 'P2G-HV7.5KWH',
+    sku: 'P2G-HV7.5KWH',
+    totalCells: 24,
+    numModules: 2,
+    cellsPerModule: 12,
+  };
+
+  const normalizedProduct = normalizeBatteryProductTemplate({ ...originalProduct, numModules: 3, cellsPerModule: 20, totalCells: 60 });
+  assert.equal(normalizedProduct.numModules, 2);
+  assert.equal(normalizedProduct.cellsPerModule, 12);
+  assert.equal(normalizedProduct.totalCells, 24);
+
+  const cells = Array.from({ length: 24 }, (_, index) => ({ id: `cell-${index + 1}`, internalSerial: `CELL-${index + 1}` }));
+
+  const modules = buildModulePlan({
+    batterySerial: 'P2G-7K5-2409-000001',
+    cells,
+    bmu: { id: 'bmu-1', serialNumber: 'P2G-BMU-001' },
+  }, normalizedProduct, 'PO-1', 'BAT-1');
+
+  assert.equal(modules.length, 2);
+  assert.deepEqual(modules.map(module => module.moduleIndex), [0, 1]);
+  assert.deepEqual(modules.map(module => module.cellIds.length), [12, 12]);
+  assert.deepEqual(modules[0].cellIds.slice(0, 3), ['cell-1', 'cell-2', 'cell-3']);
+  assert.equal(modules[1].cellIds.at(-1), 'cell-24');
+});
+
+test('completed battery release plan assigns passing welding and qc status and marks battery released', () => {
+  const plan = buildCompletedBatteryReleasePlan({
+    batteryId: 'bat-1',
+    batterySerial: 'P2G-7K5-2409-000001',
+    moduleCount: 2,
+    bmuId: 'bmu-1',
+    userId: 'user-1',
+    createdAt: new Date('2026-08-31T00:00:00Z'),
+  });
+
+  assert.equal(plan.moduleTests.length, 4);
+  assert.ok(plan.moduleTests.every(test => test.passed === true));
+  assert.equal(plan.batteryTest.passed, true);
+  assert.equal(plan.release.status, 'RELEASED');
+  assert.equal(plan.release.progressPercent, 100);
+});
+
+test('module cell assignment deduplicates reused cell ids before insert', () => {
+  const cellIds = ['cell-1', 'cell-2', 'cell-2', 'cell-3', '', 'cell-3'];
+  const unique = dedupeModuleCellAssignments(cellIds);
+
+  assert.deepEqual(unique, ['cell-1', 'cell-2', 'cell-3']);
 });

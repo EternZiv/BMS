@@ -334,6 +334,7 @@ create table if not exists public.modules (
     serial_number text unique,
     status module_status not null default 'CREATED',
     welding_result_json jsonb,
+    qc_result_json jsonb,
     matching_score numeric not null default 0,
     matching_metrics jsonb not null default '{}'::jsonb,
     created_at timestamptz not null default now(),
@@ -341,6 +342,8 @@ create table if not exists public.modules (
     unique (battery_id, module_index)
 );
 
+alter table public.modules add column if not exists welding_result_json jsonb;
+alter table public.modules add column if not exists qc_result_json jsonb;
 alter table public.modules add column if not exists matching_score numeric;
 alter table public.modules add column if not exists matching_metrics jsonb;
 update public.modules set matching_score = coalesce(matching_score, 0) where matching_score is null;
@@ -678,8 +681,11 @@ begin
     select jsonb_build_object(
         'inventory', jsonb_build_object(
             'totalCells', (select count(*) from public.cells),
-            'availableCells', (select count(*) from public.cells where status in ('AVAILABLE', 'OCV_TESTED', 'GRADED', 'IMPORTED', 'ACKNOWLEDGED') and reserved_for_order_id is null),
-            'usedCells', (select count(*) from public.cells where status in ('RESERVED','SCANNED','ASSEMBLED','IN_PROCESS','VALIDATING','TESTING','PASSED','MODULE_ASSIGNED') or (reserved_for_order_id is not null and exists(select 1 from public.module_cells mc where mc.cell_id = public.cells.id))),
+            'usedCells', (select count(distinct cell_id) from public.module_cells),
+            'availableCells', (
+                (select count(*) from public.cells)
+                - (select count(distinct cell_id) from public.module_cells)
+            ),
             'reservedCells', (select count(*) from public.cells where reserved_for_order_id is not null),
             'quarantinedCells', (select count(*) from public.cells where status = 'QUARANTINED'),
             'finishedBatteries', (select count(*) from public.batteries where status in ('FINISHED', 'RELEASED', 'DISPATCHED')),
@@ -771,8 +777,12 @@ create or replace function public.delete_battery_cascade(
 declare
     v_order_id text;
 begin
+    if p_battery_id is null or p_battery_id = '' then
+        raise exception 'Battery id is required';
+    end if;
+
     select production_order_id into v_order_id from public.batteries where id = p_battery_id;
-    
+
     update public.cells
     set status = 'AVAILABLE',
         reserved_for_battery_id = null,
@@ -783,17 +793,33 @@ begin
         select id from public.modules where battery_id = p_battery_id
     );
 
-    update public.bms_units set reserved_for_battery_id = null, status = 'AVAILABLE' where reserved_for_battery_id = p_battery_id;
-    update public.bmu_units set reserved_for_battery_id = null, status = 'AVAILABLE' where reserved_for_battery_id = p_battery_id;
+    update public.bms_units
+    set reserved_for_battery_id = null,
+        status = 'AVAILABLE',
+        updated_at = now()
+    where reserved_for_battery_id = p_battery_id;
+
+    update public.bmu_units
+    set reserved_for_battery_id = null,
+        status = 'AVAILABLE',
+        updated_at = now()
+    where reserved_for_battery_id = p_battery_id;
+
+    update public.batteries
+    set bms_id = null,
+        bmu_id = null,
+        updated_at = now()
+    where id = p_battery_id;
 
     delete from public.modules where battery_id = p_battery_id;
     delete from public.batteries where id = p_battery_id;
+
     if v_order_id is not null and not exists (select 1 from public.batteries where production_order_id = v_order_id) then
         delete from public.production_orders where id = v_order_id;
     end if;
-    
+
     insert into public.audit_logs (entity_type, entity_id, action, actor, result, details)
-    values ('BATTERY', p_battery_id, 'DELETE_CASCADE', coalesce(auth.uid()::text, 'SYSTEM'), 'SUCCESS', 'Battery and modules cascade deleted');
+    values ('BATTERY', p_battery_id, 'DELETE_CASCADE', coalesce(auth.uid()::text, 'SYSTEM'), 'SUCCESS', 'Battery and modules cascade deleted; all linked BMU/BMS assignments released');
 end;
 $$ language plpgsql security definer;
 
@@ -1323,7 +1349,11 @@ begin
             set welding_result_json = jsonb_build_object(
                 'status', v_mod.welding_status,
                 'welded_at', now(),
-                'operator_id', auth.uid()
+                'operator_id', auth.uid(),
+                'notes', v_notes,
+                'laserPowerWatts', 2800,
+                'weldTimeMs', 4200,
+                'pullForceKg', 18.5
             ),
             status = 'WELDED',
             updated_at = now()
@@ -1335,8 +1365,16 @@ begin
 
         if v_mod.physical_visual_ok is not null or v_mod.voltage_qc_ok is not null then
             update public.modules
-            set status = case when v_qc_ok then 'PASSED'::module_status else 'FAILED'::module_status end,
-                updated_at = now()
+            set qc_result_json = jsonb_build_object(
+                'status', case when v_qc_ok then 'PASSED' else 'FAILED' end,
+                'physicalVisualOk', coalesce(v_mod.physical_visual_ok, true),
+                'voltageQcOk', coalesce(v_mod.voltage_qc_ok, true),
+                'inspectedAt', now(),
+                'inspectorId', auth.uid(),
+                'notes', v_notes
+            ),
+            status = case when v_qc_ok then 'PASSED'::module_status else 'FAILED'::module_status end,
+            updated_at = now()
             where id = v_module_id;
 
             insert into public.module_tests (id, module_id, test_type, passed, result_json, remarks, tested_by, tested_at)
@@ -1980,6 +2018,21 @@ drop policy if exists "Read Module Cells" on public.module_cells;
 create policy "Read Module Cells" on public.module_cells for select using (auth.role() = 'authenticated');
 drop policy if exists "Write Module Cells" on public.module_cells;
 create policy "Write Module Cells" on public.module_cells for all using (public.has_permission('MANAGE_PRODUCTION') or public.has_permission('ALL'));
+
+drop policy if exists "Read Module Tests" on public.module_tests;
+create policy "Read Module Tests" on public.module_tests for select using (auth.role() = 'authenticated');
+drop policy if exists "Write Module Tests" on public.module_tests;
+create policy "Write Module Tests" on public.module_tests for all using (public.has_permission('MANAGE_PRODUCTION') or public.has_permission('ALL'));
+
+drop policy if exists "Read Controller Tests" on public.controller_tests;
+create policy "Read Controller Tests" on public.controller_tests for select using (auth.role() = 'authenticated');
+drop policy if exists "Write Controller Tests" on public.controller_tests;
+create policy "Write Controller Tests" on public.controller_tests for all using (public.has_permission('MANAGE_PRODUCTION') or public.has_permission('ALL'));
+
+drop policy if exists "Read Battery Tests" on public.battery_tests;
+create policy "Read Battery Tests" on public.battery_tests for select using (auth.role() = 'authenticated');
+drop policy if exists "Write Battery Tests" on public.battery_tests;
+create policy "Write Battery Tests" on public.battery_tests for all using (public.has_permission('MANAGE_PRODUCTION') or public.has_permission('ALL'));
 
 drop policy if exists "Read Controllers" on public.bms_units;
 create policy "Read Controllers" on public.bms_units for select using (auth.role() = 'authenticated');
