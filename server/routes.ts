@@ -1179,8 +1179,15 @@ apiRouter.get('/production-orders', (req, res) => {
       const modules: ModuleItem[] = [];
       for (let m = 0; m < product.numModules; m++) {
         const modId = `mod-${Date.now()}-${q}-${m}`;
-        const nextModuleNumber = Array.from(db.modules.values()).reduce((max, module) => Math.max(max, Number(module.serialNumber.match(/^mod-(\d+)$/i)?.[1] || 0)), 0) + m + 1;
-        const modSerial = `mod-${String(nextModuleNumber).padStart(5, '0')}`;
+        const now = new Date();
+        const day = String(now.getDate()).padStart(2, '0');
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const modulePrefix = `P2G-MOD-${day}${month}`;
+        const nextModuleNumber = Array.from(db.modules.values()).reduce((max, module) => {
+          const match = module.serialNumber.match(new RegExp(`^${modulePrefix}-(\\d+)$`, 'i'));
+          return Math.max(max, Number(match?.[1] || 0));
+        }, 0) + m + 1;
+        const modSerial = `P2G-MOD-${day}${month}-${String(nextModuleNumber).padStart(5, '0')}`;
         const mod: ModuleItem = {
           id: modId,
           serialNumber: modSerial,

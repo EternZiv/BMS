@@ -49,15 +49,15 @@ export const ProductionPlanningView: React.FC = () => {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [prods, ords, cells] = await Promise.all([
+      const [prods, ords, cellCounts] = await Promise.all([
         api.getProducts(),
         api.getProductionOrders(),
-        api.getCells({ status: 'AVAILABLE' }),
+        api.getCellCounts(),
       ]);
 
       setProducts(prods);
       setOrders(ords);
-      setAvailableCellsCount(cells.length);
+      setAvailableCellsCount(cellCounts.available);
 
       if (prods.length > 0 && !selectedProductId) {
         setSelectedProductId(prods[0].id);
@@ -176,7 +176,7 @@ export const ProductionPlanningView: React.FC = () => {
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
         <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between">
           <div>
-            <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Available Grade-A Cells</span>
+            <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Available Cells</span>
             <p className="text-2xl font-black font-mono text-emerald-600 mt-1">{availableCellsCount} <span className="text-xs font-normal text-slate-400 font-sans">units</span></p>
             <span className="text-[10px] text-slate-400 font-medium">Ready for allocation</span>
           </div>
@@ -374,7 +374,7 @@ export const ProductionPlanningView: React.FC = () => {
                   <div className="flex justify-between items-center">
                     <div>
                       <span className="text-slate-400 block text-[9px] font-sans font-bold uppercase tracking-wider">CELLS REQUIRED FOR BATCH</span>
-                      <strong className="text-slate-900 text-sm">{requiredCells} Grade-A Cells</strong>
+                      <strong className="text-slate-900 text-sm">{requiredCells} Cells</strong>
                       <span className="text-slate-500 block text-[10px]">Available Inventory: {availableCellsCount} cells</span>
                     </div>
                     {cellShortage > 0 ? (
@@ -391,7 +391,7 @@ export const ProductionPlanningView: React.FC = () => {
 
                 {hasShortage && (
                   <p className="text-xs text-black">
-                    Cannot start production order: Import supplier cell manifest to replenish available Grade-A cells before proceeding.
+                    Cannot start production order: Import supplier cell manifest to replenish available cells before proceeding.
                   </p>
                 )}
               </div>

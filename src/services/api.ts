@@ -277,80 +277,120 @@ async getUsers(): Promise<User[]> {
   // Dashboard stats
   async getDashboardStats(): Promise<any> {
     if (!rawSupabase) throw new Error('Supabase is not configured.');
-    const { data, error } = await rawSupabase.rpc('get_dashboard_summary');
-    if (error) throw error;
-    const inventoryCells = await this.getCells();
-    const totalCells = inventoryCells.length;
-    const reservedCells = inventoryCells.filter(cell => cell.reservedForOrderId || cell.reservedForBatteryId).length;
-    const quarantinedCells = inventoryCells.filter(cell => cell.status === 'QUARANTINED').length;
-    const usedCells = inventoryCells.filter(cell => {
-      if (cell.reservedForOrderId || cell.reservedForBatteryId) return true;
-      return ['RESERVED', 'MODULE_ASSIGNED', 'SCANNED', 'ASSEMBLED', 'IN_PROCESS', 'VALIDATING', 'TESTING', 'PASSED']
-        .includes(cell.status || '');
-    }).length;
-    const availableCells = inventoryCells.filter(cell =>
-      ['AVAILABLE', 'OCV_TESTED', 'GRADED'].includes(cell.status || '') && !cell.reservedForOrderId && !cell.reservedForBatteryId,
-    ).length;
-    const inventorySummary = {
-      ...(data?.inventory || {}),
-      totalCells,
-      availableCells,
-      reservedCells,
-      usedCells,
-      quarantinedCells,
-    };
     
-    // Add default fallbacks to satisfy the UI contract if the RPC returns partial data
-    return {
-      inventory: inventorySummary.totalCells > 0 ? inventorySummary : {
-        totalCells: 0, availableCells: 0, usedCells: 0, reservedCells: 0,
-        inProcessCells: 0, assembledCells: 0, quarantinedCells: 0,
-        finishedBatteries: 0, inProcessBatteries: 0
-      },
-      quality: data?.quality || { firstPassYieldPercent: 100, quarantinedCount: 0 },
-      orders: data?.orders || { total: 0, inProcess: 0, completed: 0, planned: 0 },
-      kpis: data?.kpis ? {
-        ...data.kpis,
-        totalCellsInInventory: totalCells,
-        availableCells,
-        usedCells,
-        reservedCells,
-        quarantinedCells,
-      } : {
-        totalCellsInInventory: 0, availableCells: 0, usedCells: 0, reservedCells: 0,
-        inProcessCells: 0, assembledCells: 0, quarantinedCells: 0,
-        totalBatteriesCompleted: 0, batteriesInProduction: 0, activeOrders: 0,
-        firstPassYield: 100, onlineMachines: 0, totalMachines: 0
-      },
-      recentBatteries: Array.isArray(data?.recentBatteries) ? toAppValue(data.recentBatteries) : [],
-      recentOrders: [],
-      recentAuditLogs: [],
-      machines: [],
-      finishedPackTrend: [],
-      activeBatchTrend: [],
-      batteryBuildTrend: [],
-      bmsTelemetry: { total: 0, tested: 0 },
-      controllerInventory: data?.inventory ? {
-        availableBms: Number(data.inventory.availableBms || 0),
-        availableBmu: Number(data.inventory.availableBmu || 0),
-        totalBms: Number(data.inventory.totalBms || 0),
-        totalBmu: Number(data.inventory.totalBmu || 0),
-      } : { availableBms: 0, availableBmu: 0, totalBms: 0, totalBmu: 0 },
-      cellBuckets: [],
-      quarantineOpenCount: data?.inventory?.quarantinedCells || 0,
-    };
+    try {
+      // Use RPC for dashboard summary (much faster than loading all cells)
+      const { data, error } = await rawSupabase.rpc('get_dashboard_summary');
+      
+      if (error) {
+        console.warn('Dashboard RPC error:', error.message);
+        // Return empty defaults instead of trying to load 9999 cells
+        return {
+          inventory: {
+            totalCells: 0, availableCells: 0, usedCells: 0, reservedCells: 0,
+            inProcessCells: 0, assembledCells: 0, quarantinedCells: 0,
+            finishedBatteries: 0, inProcessBatteries: 0
+          },
+          quality: { firstPassYieldPercent: 0, quarantinedCount: 0 },
+          orders: { total: 0, inProcess: 0, completed: 0, planned: 0 },
+          kpis: {
+            totalCellsInInventory: 0, availableCells: 0, usedCells: 0, reservedCells: 0,
+            inProcessCells: 0, assembledCells: 0, quarantinedCells: 0,
+            totalBatteriesCompleted: 0, batteriesInProduction: 0, activeOrders: 0,
+            firstPassYield: 0, onlineMachines: 0, totalMachines: 0
+          },
+          recentBatteries: [],
+          recentOrders: [],
+          recentAuditLogs: [],
+          machines: [],
+          finishedPackTrend: [],
+          activeBatchTrend: [],
+        };
+      }
+
+      // Use data from RPC - it's already optimized at database level
+      return {
+        inventory: data?.inventory || {
+          totalCells: 0, availableCells: 0, usedCells: 0, reservedCells: 0,
+          inProcessCells: 0, assembledCells: 0, quarantinedCells: 0,
+          finishedBatteries: 0, inProcessBatteries: 0
+        },
+        quality: data?.quality || { firstPassYieldPercent: 0, quarantinedCount: 0 },
+        orders: data?.orders || { total: 0, inProcess: 0, completed: 0, planned: 0 },
+        kpis: data?.kpis || {
+          totalCellsInInventory: data?.inventory?.totalCells || 0,
+          availableCells: data?.inventory?.availableCells || 0,
+          usedCells: data?.inventory?.usedCells || 0,
+          reservedCells: data?.inventory?.reservedCells || 0,
+          inProcessCells: 0,
+          assembledCells: 0,
+          quarantinedCells: data?.inventory?.quarantinedCells || 0,
+          totalBatteriesCompleted: data?.inventory?.finishedBatteries || 0,
+          batteriesInProduction: data?.inventory?.inProcessBatteries || 0,
+          activeOrders: 0,
+          firstPassYield: 100,
+          onlineMachines: 0,
+          totalMachines: 0
+        },
+        recentBatteries: Array.isArray(data?.recentBatteries) ? toAppValue(data.recentBatteries) : [],
+        recentOrders: Array.isArray(data?.recentOrders) ? data.recentOrders : [],
+        recentAuditLogs: Array.isArray(data?.recentAuditLogs) ? data.recentAuditLogs : [],
+        machines: Array.isArray(data?.machines) ? data.machines : [],
+        finishedPackTrend: Array.isArray(data?.finishedPackTrend) ? data.finishedPackTrend : [],
+        activeBatchTrend: Array.isArray(data?.activeBatchTrend) ? data.activeBatchTrend : [],
+        batteryBuildTrend: Array.isArray(data?.batteryBuildTrend) ? data.batteryBuildTrend : [],
+        bmsTelemetry: data?.bmsTelemetry || { total: 0, tested: 0 },
+        controllerInventory: data?.inventory ? {
+          availableBms: Number(data.inventory.availableBms || 0),
+          availableBmu: Number(data.inventory.availableBmu || 0),
+          totalBms: Number(data.inventory.totalBms || 0),
+          totalBmu: Number(data.inventory.totalBmu || 0),
+        } : { availableBms: 0, availableBmu: 0, totalBms: 0, totalBmu: 0 },
+        cellBuckets: Array.isArray(data?.cellBuckets) ? data.cellBuckets : [],
+        quarantineOpenCount: data?.inventory?.quarantinedCells || 0,
+      };
+    } catch (error) {
+      console.error('Error fetching dashboard stats:', error);
+      // Return empty defaults on error
+      return {
+        inventory: {
+          totalCells: 0, availableCells: 0, usedCells: 0, reservedCells: 0,
+          inProcessCells: 0, assembledCells: 0, quarantinedCells: 0,
+          finishedBatteries: 0, inProcessBatteries: 0
+        },
+        quality: { firstPassYieldPercent: 0, quarantinedCount: 0 },
+        orders: { total: 0, inProcess: 0, completed: 0, planned: 0 },
+        kpis: {
+          totalCellsInInventory: 0, availableCells: 0, usedCells: 0, reservedCells: 0,
+          inProcessCells: 0, assembledCells: 0, quarantinedCells: 0,
+          totalBatteriesCompleted: 0, batteriesInProduction: 0, activeOrders: 0,
+          firstPassYield: 0, onlineMachines: 0, totalMachines: 0
+        },
+        recentBatteries: [],
+        recentOrders: [],
+        recentAuditLogs: [],
+        machines: [],
+        finishedPackTrend: [],
+        activeBatchTrend: [],
+        batteryBuildTrend: [],
+        bmsTelemetry: { total: 0, tested: 0 },
+        controllerInventory: { availableBms: 0, availableBmu: 0, totalBms: 0, totalBmu: 0 },
+        cellBuckets: [],
+        quarantineOpenCount: 0,
+      };
+    }
   },
 
   // Reports & Quality Analytics
   async getReportsAnalytics(): Promise<any> {
     const [cells, batteriesResult, modulesResult, bmsResult, cellTestsResult, batteryTestsResult, quarantineResult] = await Promise.all([
-      this.getCells(),
-      supabase.from('batteries').select('*'),
-      supabase.from('modules').select('*'),
-      supabase.from('bms_units').select('*'),
-      supabase.from('cell_tests').select('*'),
-      supabase.from('battery_tests').select('*'),
-      supabase.from('quarantine_records').select('*'),
+      this.getCells({ limit: 10000, fields: 'id,internal_serial,supplier_barcode,supplier_ocv_v,production_ocv_v,status,reserved_for_order_id,reserved_for_battery_id,tested_at' }),
+      supabase.from('batteries').select('id,status,step_results_json,created_at'),
+      supabase.from('modules').select('id,status,welding_result_json'),
+      supabase.from('bms_units').select('id,status,test_result_json'),
+      supabase.from('cell_tests').select('id,cell_id,battery_id,passed,tested_at'),
+      supabase.from('battery_tests').select('id,battery_id,passed,tested_at'),
+      supabase.from('quarantine_records').select('id,entity_type,entity_id,reason,status'),
     ]);
     const results = [batteriesResult, modulesResult, bmsResult, cellTestsResult, batteryTestsResult, quarantineResult];
     const failedResult = results.find(result => result.error);
@@ -496,7 +536,7 @@ async getUsers(): Promise<User[]> {
   async getSuppliers(): Promise<Supplier[]> {
     const { data, error } = await supabase
       .from('suppliers')
-      .select('*')
+      .select('id,name,contact_email,status,created_at,updated_at')
       .order('created_at', { ascending: false });
     if (error) throw error;
     return data || [];
@@ -547,14 +587,31 @@ async getUsers(): Promise<User[]> {
   },
 
   // Inventory
-  async getCells(params?: { status?: string; search?: string; limit?: number; usedOnly?: boolean }): Promise<CellItem[]> {
+  async getCellCounts(): Promise<{ total: number; used: number; available: number; quarantined: number }> {
+    const [totalResult, usedResult, availableResult, quarantinedResult] = await Promise.all([
+      supabase.from('cells').select('id', { count: 'exact', head: true }),
+      supabase.from('cells').select('id', { count: 'exact', head: true }).or('reserved_for_battery_id.not.is.null,reserved_for_order_id.not.is.null'),
+      supabase.from('cells').select('id', { count: 'exact', head: true }).in('status', ['AVAILABLE', 'OCV_TESTED', 'GRADED', 'IMPORTED', 'ACKNOWLEDGED']).is('reserved_for_order_id', null).is('reserved_for_battery_id', null),
+      supabase.from('cells').select('id', { count: 'exact', head: true }).eq('status', 'QUARANTINED'),
+    ]);
+    const failedResult = [totalResult, usedResult, availableResult, quarantinedResult].find(result => result.error);
+    if (failedResult?.error) throw failedResult.error;
+    return {
+      total: totalResult.count || 0,
+      used: usedResult.count || 0,
+      available: availableResult.count || 0,
+      quarantined: quarantinedResult.count || 0,
+    };
+  },
+
+  async getCells(params?: { status?: string; search?: string; limit?: number; usedOnly?: boolean; fields?: string }): Promise<CellItem[]> {
     const pageSize = 1000;
     const requestedLimit = params?.limit && params.limit > 0 ? params.limit : undefined;
     const cells: CellItem[] = [];
     const seen = new Set<string>();
 
     for (let offset = 0; requestedLimit === undefined || cells.length < requestedLimit; offset += pageSize) {
-      let query = supabase.from('cells').select('*');
+      let query = supabase.from('cells').select(params?.fields || '*');
 
       if (params?.status) {
         if (params.status === 'AVAILABLE') {
@@ -564,7 +621,7 @@ async getUsers(): Promise<User[]> {
         }
       }
       if (params?.usedOnly === true) {
-        query = query.or('reservedForBatteryId.not.is.null,reservedForOrderId.not.is.null');
+        query = query.or('reserved_for_battery_id.not.is.null,reserved_for_order_id.not.is.null');
       }
       if (params?.search && typeof params.search === 'string') {
         const q = params.search.toLowerCase();
@@ -607,10 +664,15 @@ async getUsers(): Promise<User[]> {
     const supplier = params?.supplier || params?.manufacturer || 'Power2Go Verified';
     const protocol = 'CAN_2_0B';
     const created: BMSItem[] = [];
+    const uniqueSerials = (params?.serialNumbers || [])
+      .map(value => String(value).trim())
+      .filter(Boolean)
+      .filter((value, index, arr) => arr.findIndex(item => item.toUpperCase() === value.toUpperCase()) === index);
+    const effectiveCount = uniqueSerials.length > 0 ? uniqueSerials.length : count;
 
-    for (let i = 1; i <= count; i++) {
+    for (let i = 1; i <= effectiveCount; i++) {
       const nextNum = i;
-      const serial = params?.serialNumbers?.[i - 1] || (params?.barcodePrefix ? `${params.barcodePrefix}-${String(nextNum).padStart(5, '0')}` : `P2G-BMS-${Date.now()}-${String(nextNum).padStart(4, '0')}`);
+      const serial = uniqueSerials[i - 1] || (params?.barcodePrefix ? `${params.barcodePrefix}-${String(nextNum).padStart(5, '0')}` : `P2G-BMS-${Date.now()}-${String(nextNum).padStart(4, '0')}`);
       const id = `bms-${crypto.randomUUID()}`;
 
       const { data, error } = await supabase.from('bms_units').insert({
@@ -630,7 +692,7 @@ async getUsers(): Promise<User[]> {
       created.push(data?.[0] || {});
     }
 
-    return { count, items: created };
+    return { count: effectiveCount, items: created };
   },
 
   async getBmuUnits(): Promise<BMUItem[]> {
@@ -644,9 +706,14 @@ async getUsers(): Promise<User[]> {
     const model = params?.model || 'Power2Go BMU-X1';
     const manufacturer = params?.manufacturer || 'Power2Go';
     const created: BMUItem[] = [];
+    const uniqueSerials = (params?.serialNumbers || [])
+      .map(value => String(value).trim())
+      .filter(Boolean)
+      .filter((value, index, arr) => arr.findIndex(item => item.toUpperCase() === value.toUpperCase()) === index);
+    const effectiveCount = uniqueSerials.length > 0 ? uniqueSerials.length : count;
 
-    for (let i = 1; i <= count; i++) {
-      const serial = params?.serialNumbers?.[i - 1] || (params?.barcodePrefix ? `${params.barcodePrefix}-${String(i).padStart(5, '0')}` : `P2G-BMU-${Date.now()}-${String(i).padStart(4, '0')}`);
+    for (let i = 1; i <= effectiveCount; i++) {
+      const serial = uniqueSerials[i - 1] || (params?.barcodePrefix ? `${params.barcodePrefix}-${String(i).padStart(5, '0')}` : `P2G-BMU-${Date.now()}-${String(i).padStart(4, '0')}`);
       const id = `bmu-${crypto.randomUUID()}`;
       const { data, error } = await supabase.from('bmu_units').insert({
         id,
@@ -662,7 +729,7 @@ async getUsers(): Promise<User[]> {
       created.push(data?.[0] || {} as BMUItem);
     }
 
-    return { count, items: created };
+    return { count: effectiveCount, items: created };
   },
 
   async updateBms(id: string, update: { status?: string; model?: string; firmwareVersion?: string; hardwareVersion?: string; protocol?: string }): Promise<BMSItem> {
@@ -1235,8 +1302,8 @@ async getUsers(): Promise<User[]> {
     const { data: modules, error: modulesError } = await supabase
       .from('modules')
       .select('*')
-      .eq('batteryId', batteryId)
-      .order('moduleIndex', { ascending: true });
+      .eq('battery_id', batteryId)
+      .order('module_index', { ascending: true });
     if (modulesError) throw modulesError;
     const targetModuleIndex = data.moduleIndex || 0;
     const targetModule = (modules || []).find((module: any) => module.moduleIndex === targetModuleIndex);
@@ -1282,18 +1349,18 @@ async getUsers(): Promise<User[]> {
     const { data: assignments, error: assignmentError } = moduleIds.length > 0
       ? await supabase
           .from('module_cells')
-          .select('moduleId, cellId, cellSlotIndex')
-          .in('moduleId', moduleIds)
-          .order('cellSlotIndex', { ascending: true })
+          .select('module_id, cell_id, cell_slot_index')
+          .in('module_id', moduleIds)
+          .order('cell_slot_index', { ascending: true })
       : { data: [], error: null };
     if (assignmentError) throw assignmentError;
 
-    const sourceModule = (modules || []).find((module: any) => module.moduleIndex === sourceModuleIndex);
-    const targetModule = (modules || []).find((module: any) => module.moduleIndex === targetModuleIndex);
+    const sourceModule = (modules || []).find((module: any) => module.module_index === sourceModuleIndex);
+    const targetModule = (modules || []).find((module: any) => module.module_index === targetModuleIndex);
 
     const sourceAssignment = explicitCellId
-      ? (assignments || []).find((assignment: any) => assignment.cellId === explicitCellId)
-      : (assignments || []).find((assignment: any) => assignment.moduleId === sourceModule?.id && assignment.cellSlotIndex === sourceCellSlotIndex);
+      ? (assignments || []).find((assignment: any) => assignment.cell_id === explicitCellId)
+      : (assignments || []).find((assignment: any) => assignment.module_id === sourceModule?.id && assignment.cell_slot_index === sourceCellSlotIndex);
 
     if (!sourceModule || !targetModule || !sourceAssignment) {
       throw new Error('The selected cell or target module does not exist.');
@@ -1301,7 +1368,7 @@ async getUsers(): Promise<User[]> {
 
     const { error: moveError } = await rawSupabase.rpc('move_cell_transaction', {
       p_battery_id: batteryId,
-      p_cell_id: sourceAssignment.cellId,
+      p_cell_id: sourceAssignment.cell_id,
       p_target_module_id: targetModule.id,
       p_target_slot: targetCellSlotIndex,
     });

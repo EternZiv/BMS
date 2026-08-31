@@ -9,6 +9,7 @@ import {
   ArrowRight,
   Zap,
   Check,
+  GripVertical,
   RotateCcw,
   Sparkles,
   ShieldAlert,
@@ -40,6 +41,8 @@ export const ModuleWorkflowView: React.FC = () => {
   const [moduleStates, setModuleStates] = useState<Record<string, ModuleRowState>>({});
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [draggedCell, setDraggedCell] = useState<{ moduleIndex: number; cellSlotIndex: number; cellId: string } | null>(null);
+  const [movingCell, setMovingCell] = useState(false);
 
   useEffect(() => {
     if (activeBatteryId) {
@@ -124,6 +127,33 @@ export const ModuleWorkflowView: React.FC = () => {
       addNotification('error', 'Save Failed', err.message || 'Failed to complete module workflow');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleCellDrop = async (targetModuleIndex: number, targetCellSlotIndex: number) => {
+    if (!battery || !draggedCell || movingCell) return;
+    if (draggedCell.moduleIndex === targetModuleIndex && draggedCell.cellSlotIndex === targetCellSlotIndex) {
+      setDraggedCell(null);
+      return;
+    }
+
+    setMovingCell(true);
+    try {
+      await api.moveCell(
+        battery.id,
+        draggedCell.moduleIndex,
+        draggedCell.cellSlotIndex,
+        targetModuleIndex,
+        targetCellSlotIndex,
+        draggedCell.cellId,
+      );
+      await loadBattery(battery.id);
+      addNotification('success', 'Cell Slot Updated', 'The cell was moved to the selected slot.');
+    } catch (err: any) {
+      addNotification('error', 'Cell Move Failed', err.message || 'Unable to update the cell slot.');
+    } finally {
+      setDraggedCell(null);
+      setMovingCell(false);
     }
   };
 
@@ -247,17 +277,37 @@ export const ModuleWorkflowView: React.FC = () => {
                           <span className="block text-[9px] font-black uppercase tracking-wider text-slate-400">
                             Assigned Cells
                           </span>
-                          {(mod.cells || []).length > 0 ? (
-                            mod.cells.map((cell, cellIndex) => (
-                              <div key={cell.id || `${mod.id}-cell-${cellIndex}`} className="rounded-md bg-slate-50 px-2 py-1.5 text-[10px] leading-tight">
-                                <span className="block font-mono font-bold text-slate-700">
-                                  Slot {(cell.moduleSlotIndex ?? cellIndex) + 1}: {cell.internalSerial}
-                                </span>
-                                <span className="block font-mono text-slate-400">
-                                  Barcode: {cell.supplierBarcode}
-                                </span>
-                              </div>
-                            ))
+                            {(mod.cells || []).length > 0 ? (
+                              mod.cells.map((cell, cellIndex) => {
+                                const cellSlotIndex = cell.moduleSlotIndex ?? cellIndex;
+                                return (
+                                  <div
+                                    key={cell.id || `${mod.id}-cell-${cellIndex}`}
+                                    draggable={!movingCell}
+                                    onDragStart={(event) => {
+                                      setDraggedCell({ moduleIndex: mod.moduleIndex ?? idx, cellSlotIndex, cellId: cell.id });
+                                      event.dataTransfer.effectAllowed = 'move';
+                                      event.dataTransfer.setData('text/plain', cell.id);
+                                    }}
+                                    onDragEnd={() => setDraggedCell(null)}
+                                    onDragOver={(event) => event.preventDefault()}
+                                    onDrop={(event) => {
+                                      event.preventDefault();
+                                      void handleCellDrop(mod.moduleIndex ?? idx, cellSlotIndex);
+                                    }}
+                                    className={`group rounded-md bg-slate-50 px-2 py-1.5 text-[10px] leading-tight border border-transparent hover:border-emerald-300 cursor-grab active:cursor-grabbing ${draggedCell?.cellId === cell.id ? 'opacity-50 ring-2 ring-emerald-300' : ''}`}
+                                    title="Drag this cell onto another cell to swap slots, or onto an empty slot in the builder"
+                                  >
+                                    <span className="flex items-center gap-1 font-mono font-bold text-slate-700">
+                                      <GripVertical className="w-3 h-3 text-slate-400 shrink-0" />
+                                      Slot {cellSlotIndex + 1}: {cell.internalSerial}
+                                    </span>
+                                    <span className="block font-mono text-slate-400 pl-4">
+                                      Barcode: {cell.supplierBarcode}
+                                    </span>
+                                  </div>
+                                );
+                              })
                           ) : (
                             <span className="text-[10px] text-slate-400">No cells assigned</span>
                           )}

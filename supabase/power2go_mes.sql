@@ -87,9 +87,14 @@ create or replace function public.has_permission(required_permission text)
 returns boolean as $$
 declare
     user_role_id text;
+    role_exists boolean;
 begin
     select role_id into user_role_id from public.profiles where id = auth.uid() and status = 'ACTIVE';
     if user_role_id is null then return false; end if;
+    
+    -- Verify role still exists (role might have been deleted)
+    select exists(select 1 from public.roles where id = user_role_id) into role_exists;
+    if not role_exists then return false; end if;
     
     if exists (
         select 1 from public.role_permissions 
@@ -329,10 +334,21 @@ create table if not exists public.modules (
     serial_number text unique,
     status module_status not null default 'CREATED',
     welding_result_json jsonb,
+    matching_score numeric not null default 0,
+    matching_metrics jsonb not null default '{}'::jsonb,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
     unique (battery_id, module_index)
 );
+
+alter table public.modules add column if not exists matching_score numeric;
+alter table public.modules add column if not exists matching_metrics jsonb;
+update public.modules set matching_score = coalesce(matching_score, 0) where matching_score is null;
+update public.modules set matching_metrics = coalesce(matching_metrics, '{}'::jsonb) where matching_metrics is null;
+alter table public.modules alter column matching_score set default 0;
+alter table public.modules alter column matching_metrics set default '{}'::jsonb;
+alter table public.modules alter column matching_score set not null;
+alter table public.modules alter column matching_metrics set not null;
 
 -- ================================================================
 -- 8. CELLS & MODULE CELLS
@@ -623,8 +639,15 @@ begin
                 batch_number, pallet_number, box_number, supplier_ocv_v, supplier_ir_mohm, status
             ) values (
                 v_cell_id, v_internal, v_row.supplier_barcode, v_qr_code, v_supplier_id, v_import_id,
-                v_row.batch_number, v_row.pallet_number, v_row.box_number, v_row.ocv, v_row.ir, 'AVAILABLE'
+                v_row.batch_number, v_row.pallet_number, v_row.box_number, v_row.ocv, v_row.ir, 'IMPORTED'
             );
+            
+            -- GENEALOGY EVENT: Record cell import
+            perform public.record_genealogy_event(
+                'CELL', v_cell_id, 'IMPORTED', null, null,
+                jsonb_build_object('supplier_id', v_supplier_id, 'import_id', v_import_id)
+            );
+            
             v_imported := v_imported + 1;
         end if;
     end loop;
@@ -655,9 +678,9 @@ begin
     select jsonb_build_object(
         'inventory', jsonb_build_object(
             'totalCells', (select count(*) from public.cells),
-            'availableCells', (select count(*) from public.cells where status in ('AVAILABLE', 'OCV_TESTED', 'GRADED') and reserved_for_order_id is null and reserved_for_battery_id is null),
-            'usedCells', (select count(*) from public.cells where (reserved_for_order_id is not null or reserved_for_battery_id is not null) or status in ('RESERVED','MODULE_ASSIGNED','SCANNED','ASSEMBLED','IN_PROCESS','VALIDATING','TESTING','PASSED')),
-            'reservedCells', (select count(*) from public.cells where reserved_for_order_id is not null or reserved_for_battery_id is not null),
+            'availableCells', (select count(*) from public.cells where status in ('AVAILABLE', 'OCV_TESTED', 'GRADED', 'IMPORTED', 'ACKNOWLEDGED') and reserved_for_order_id is null),
+            'usedCells', (select count(*) from public.cells where status in ('RESERVED','SCANNED','ASSEMBLED','IN_PROCESS','VALIDATING','TESTING','PASSED','MODULE_ASSIGNED') or (reserved_for_order_id is not null and exists(select 1 from public.module_cells mc where mc.cell_id = public.cells.id))),
+            'reservedCells', (select count(*) from public.cells where reserved_for_order_id is not null),
             'quarantinedCells', (select count(*) from public.cells where status = 'QUARANTINED'),
             'finishedBatteries', (select count(*) from public.batteries where status in ('FINISHED', 'RELEASED', 'DISPATCHED')),
             'inProcessBatteries', (select count(*) from public.batteries where status in ('ASSEMBLY', 'TESTING', 'QC', 'CREATED'))
@@ -807,6 +830,9 @@ declare
     v_cells_per_module integer;
     v_total_cells_per_battery integer;
     v_po_record record;
+    v_reserved_cell record;
+    v_cell_serial_prefix text;
+    v_next_cell_number integer;
     i integer;
     j integer;
     v_cell_slice_ids text[];
@@ -850,17 +876,27 @@ begin
         from public.batteries
         where serial_number ~ '^P2G-[A-Z0-9.]+-[0-9]{4}-[0-9]{6}$';
     end if;
-    perform pg_advisory_xact_lock(hashtext('mod-global')); 
+    perform pg_advisory_xact_lock(hashtext('P2G-module-serials')); 
     select coalesce(max((substring(serial_number from '([0-9]+)$'))::integer), 0) + 1
     into v_next_module_number
     from public.modules
-    where serial_number ~ '^mod-[0-9]+$';
+    where serial_number like 'P2G-MOD-' || to_char(current_date, 'DDMM') || '-%';
 
     v_required_cells := v_total_cells_per_battery * p_quantity;
 
+    -- Assign traceable production serials when cells become reserved.
+    v_cell_serial_prefix := 'P2G-CL-' || to_char(current_date, 'MMDD');
+    perform pg_advisory_xact_lock(hashtext(v_cell_serial_prefix));
+    select coalesce(max((substring(internal_serial from '([0-9]+)$'))::integer), 0) + 1
+    into v_next_cell_number
+    from public.cells
+    where internal_serial like v_cell_serial_prefix || '-%';
+
     select array_agg(id) into v_cell_ids from (
         select id from public.cells
-        where status = 'AVAILABLE'
+                where status in ('AVAILABLE', 'IMPORTED', 'ACKNOWLEDGED', 'OCV_TESTED', 'GRADED')
+                    and reserved_for_order_id is null
+                    and reserved_for_battery_id is null
         order by created_at asc
         limit v_required_cells
         for update
@@ -906,7 +942,7 @@ begin
 
         for j in 1..v_num_modules loop
             v_module_id := 'mod-' || gen_random_uuid()::text;
-            v_module_serial := 'mod-' || lpad(v_next_module_number::text, 5, '0');
+            v_module_serial := 'P2G-MOD-' || to_char(current_date, 'DDMM') || '-' || lpad(v_next_module_number::text, 5, '0');
             v_next_module_number := v_next_module_number + 1;
             
             insert into public.modules (id, battery_id, production_order_id, module_index, serial_number, status)
@@ -914,11 +950,14 @@ begin
         end loop;
 
         v_cell_slice_ids := v_cell_ids[((i - 1) * v_total_cells_per_battery + 1) : (i * v_total_cells_per_battery)];
-        update public.cells
-        set status = 'RESERVED',
-            reserved_for_order_id = v_order_id,
-            reserved_for_battery_id = v_battery_id
-        where id = any(v_cell_slice_ids);
+        for j in 1..v_total_cells_per_battery loop
+            update public.cells
+            set status = 'RESERVED',
+                internal_serial = v_cell_serial_prefix || '-' || lpad((v_next_cell_number + ((i - 1) * v_total_cells_per_battery) + j - 1)::text, 5, '0'),
+                reserved_for_order_id = v_order_id,
+                reserved_for_battery_id = v_battery_id
+            where id = v_cell_slice_ids[j];
+        end loop;
     end loop;
 
     insert into public.audit_logs (entity_type, entity_id, action, actor, result, details)
@@ -1199,6 +1238,9 @@ begin
                 status = 'OCV_TESTED'
             where id = v_cell_id;
 
+            perform public.record_genealogy_event('CELL', v_cell_id, 'OCV_TESTED', 'BATTERY', p_battery_id,
+                jsonb_build_object('ocv_v', v_ocv, 'ir_mohm', v_ir));
+
             insert into public.cell_tests (id, cell_id, battery_id, test_type, ocv_v, ir_mohm, passed, remarks, tested_by, tested_at)
             values (v_test_id, v_cell_id, p_battery_id, 'OCV_IR', v_ocv, v_ir, v_passed, v_remarks, auth.uid(), now());
 
@@ -1207,6 +1249,9 @@ begin
             set grade = v_grade,
                 status = 'GRADED'
             where id = v_cell_id;
+
+            perform public.record_genealogy_event('CELL', v_cell_id, 'GRADED', 'BATTERY', p_battery_id,
+                jsonb_build_object('grade', v_grade));
 
             insert into public.cell_tests (id, cell_id, battery_id, test_type, grade, passed, remarks, tested_by, tested_at)
             values (v_test_id, v_cell_id, p_battery_id, 'GRADING', v_grade, true, v_remarks, auth.uid(), now());
@@ -1437,10 +1482,41 @@ declare
     v_order_id text;
     v_order record;
     v_completed integer;
+    v_module_count integer;
+    v_passed_module_tests integer;
+    v_battery_tests_passed boolean;
 begin
-    select * into v_battery from public.batteries where id = p_battery_id;
+    select * into v_battery from public.batteries where id = p_battery_id for update;
     if v_battery.status = 'RELEASED' or v_battery.status = 'FINISHED' then
         raise exception 'Battery has already been released';
+    end if;
+
+    -- QC GATE 1: Validate all modules have passed QC inspection
+    select count(*) into v_module_count from public.modules where battery_id = p_battery_id;
+    if v_module_count = 0 then
+        raise exception 'Battery has no modules assigned';
+    end if;
+
+    select count(*) into v_passed_module_tests from public.module_tests
+    where module_id in (select id from public.modules where battery_id = p_battery_id)
+    and test_type in ('WELDING_INSPECTION', 'QC')
+    and passed = true;
+
+    if v_passed_module_tests < v_module_count then
+        raise exception 'Not all modules have passed QC inspection (% of % passed)', v_passed_module_tests, v_module_count;
+    end if;
+
+    -- QC GATE 2: Validate BMS/BMU is assigned
+    if v_battery.bms_id is null and v_battery.bmu_id is null then
+        raise exception 'Battery does not have BMS or BMU assigned';
+    end if;
+
+    -- QC GATE 3: Validate final EOL test passed
+    select exists(select 1 from public.battery_tests 
+        where battery_id = p_battery_id and passed = true and test_type = 'EOL') 
+    into v_battery_tests_passed;
+    if not v_battery_tests_passed then
+        raise exception 'Battery has not passed final EOL test';
     end if;
 
     update public.batteries
@@ -1496,6 +1572,12 @@ begin
         resolved_by = auth.uid(),
         resolved_at = now()
     where id = p_quarantine_id;
+
+    -- GENEALOGY EVENT: Record quarantine resolution
+    perform public.record_genealogy_event(
+        v_quarantine_record.entity_type, v_quarantine_record.entity_id, 'RELEASED_FROM_QUARANTINE', null, null,
+        jsonb_build_object('disposition', p_disposition, 'reason', v_quarantine_record.reason)
+    );
 
     if v_quarantine_record.entity_type = 'CELL' then
         update public.cells set status = case when p_disposition = 'SCRAP' then 'REJECTED'::cell_status else 'AVAILABLE'::cell_status end where id = v_quarantine_record.entity_id;
@@ -1688,12 +1770,18 @@ begin
     v_required_count := coalesce(v_product.cells_per_module, 8);
 
     for v_module in select * from public.modules where battery_id = p_battery_id order by module_index asc loop
+        -- Validate module index is within product spec
+        if v_module.module_index < 0 or v_module.module_index >= v_product.num_modules then
+            raise exception 'Module index % out of range for product with % modules', 
+                v_module.module_index, v_product.num_modules;
+        end if;
+
         select array_agg(id) into v_matched_cell_ids from (
             select id from public.cells
             where reserved_for_battery_id = p_battery_id
             and id not in (select cell_id from public.module_cells)
-            and status in ('AVAILABLE', 'RESERVED', 'VALIDATING', 'PASSED', 'IMPORTED')
-            order by supplier_ocv_v desc, id asc
+            and status in ('AVAILABLE', 'RESERVED', 'VALIDATING', 'PASSED', 'IMPORTED', 'OCV_TESTED', 'GRADED')
+            order by coalesce(production_ocv_v, supplier_ocv_v) desc, id asc
             limit v_required_count
             for update
         ) x;
@@ -1972,63 +2060,114 @@ begin
         insert into public.role_permissions (role_id, permission_id) 
         values ('role-admin', 'ALL');
     end if;
-
-    -- 4. Create Admin User in auth.users
-    select id into admin_uid from public.profiles where username = 'admin';
-    if admin_uid is null then
-        select id into admin_uid from auth.users where email = 'admin@gmail.com';
-    end if;
-    
-    if admin_uid is null then
-        admin_uid := gen_random_uuid();
-        
-        insert into auth.users (
-            id,
-            instance_id,
-            email,
-            encrypted_password,
-            email_confirmed_at,
-            raw_app_meta_data,
-            raw_user_meta_data,
-            created_at,
-            updated_at,
-            role,
-            is_super_admin
-        ) values (
-            admin_uid,
-            '00000000-0000-0000-0000-000000000000',
-            'admin@gmail.com',
-            crypt('admin123456', gen_salt('bf')),
-            now(),
-            '{"provider":"email","providers":["email"]}',
-            '{"name":"Administrator"}',
-            now(),
-            now(),
-            'authenticated',
-            false
-        );
-        
-    end if;
-
-    select exists (select 1 from public.profiles where id = admin_uid) into admin_profile_exists;
-    if admin_profile_exists then
-        update public.profiles
-        set full_name = 'Administrator',
-            role_id = 'role-admin',
-            status = 'ACTIVE',
-            updated_at = now()
-        where id = admin_uid;
-    else
-        insert into public.profiles (id, full_name, email, username, role_id, status)
-        values (admin_uid, 'Administrator', 'admin@gmail.com', 'admin', 'role-admin', 'ACTIVE');
-    end if;
-
-    update auth.users
-    set encrypted_password = crypt('admin123456', gen_salt('bf')),
-        email_confirmed_at = coalesce(email_confirmed_at, now()),
-        updated_at = now()
-    where id = admin_uid;
 end $$;
+
+-- Backfill production serials for cells reserved before this numbering rule was added.
+do $$
+declare
+    reserved_cell record;
+    serial_prefix text := 'P2G-CL-' || to_char(current_date, 'MMDD');
+    next_cell_number integer;
+begin
+    perform pg_advisory_xact_lock(hashtext(serial_prefix));
+    select coalesce(max((substring(internal_serial from '([0-9]+)$'))::integer), 0) + 1
+    into next_cell_number
+    from public.cells
+    where internal_serial like serial_prefix || '-%';
+
+    for reserved_cell in
+        select id
+        from public.cells
+        where (reserved_for_order_id is not null or reserved_for_battery_id is not null)
+          and internal_serial !~ '^P2G-CL-[0-9]{4}-[0-9]{5}$'
+        order by created_at asc, id asc
+    loop
+        update public.cells
+        set internal_serial = serial_prefix || '-' || lpad(next_cell_number::text, 5, '0')
+        where id = reserved_cell.id;
+        next_cell_number := next_cell_number + 1;
+    end loop;
+end $$;
+
+-- Migrate legacy module serials to the production P2G-MOD-DDMM-SEQUENCE format.
+do $$
+declare
+    legacy_module record;
+    serial_prefix text := 'P2G-MOD-' || to_char(current_date, 'DDMM');
+    next_module_number integer;
+begin
+    perform pg_advisory_xact_lock(hashtext('P2G-module-serials'));
+    select coalesce(max((substring(serial_number from '([0-9]+)$'))::integer), 0) + 1
+    into next_module_number
+    from public.modules
+    where serial_number like serial_prefix || '-%';
+
+    for legacy_module in
+        select id
+        from public.modules
+        where serial_number !~ '^P2G-MOD-[0-9]{4}-[0-9]{5}$'
+        order by created_at asc, id asc
+    loop
+        update public.modules
+        set serial_number = serial_prefix || '-' || lpad(next_module_number::text, 5, '0')
+        where id = legacy_module.id;
+        next_module_number := next_module_number + 1;
+    end loop;
+end $$;
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- PERFORMANCE INDEXES - Critical for fast dashboard/inventory queries
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+-- Cells table indexes (9999+ rows)
+create index if not exists idx_cells_status on public.cells(status);
+create index if not exists idx_cells_status_reserved on public.cells(status, reserved_for_order_id, reserved_for_battery_id);
+create index if not exists idx_cells_created_at on public.cells(created_at desc);
+create index if not exists idx_cells_import_id on public.cells(import_id);
+create index if not exists idx_cells_supplier_id on public.cells(supplier_id);
+
+-- Batteries table indexes
+create index if not exists idx_batteries_status on public.batteries(status);
+create index if not exists idx_batteries_product_id on public.batteries(product_id);
+create index if not exists idx_batteries_production_order_id on public.batteries(production_order_id);
+create index if not exists idx_batteries_created_at on public.batteries(created_at desc);
+
+-- Modules table indexes
+create index if not exists idx_modules_battery_id on public.modules(battery_id);
+create index if not exists idx_modules_status on public.modules(status);
+
+-- Module cells junction table
+create index if not exists idx_module_cells_module_id on public.module_cells(module_id);
+create index if not exists idx_module_cells_cell_id on public.module_cells(cell_id);
+
+-- Cell tests indexes
+create index if not exists idx_cell_tests_battery_id on public.cell_tests(battery_id);
+create index if not exists idx_cell_tests_cell_id on public.cell_tests(cell_id);
+create index if not exists idx_cell_tests_tested_at on public.cell_tests(tested_at desc);
+
+-- Module tests indexes
+create index if not exists idx_module_tests_module_id on public.module_tests(module_id);
+create index if not exists idx_module_tests_passed on public.module_tests(passed);
+
+-- Battery tests indexes
+create index if not exists idx_battery_tests_battery_id on public.battery_tests(battery_id);
+create index if not exists idx_battery_tests_passed on public.battery_tests(passed);
+
+-- Quarantine records indexes
+create index if not exists idx_quarantine_records_entity on public.quarantine_records(entity_type, entity_id);
+create index if not exists idx_quarantine_records_status on public.quarantine_records(status);
+
+-- Production orders indexes
+create index if not exists idx_production_orders_status on public.production_orders(status);
+create index if not exists idx_production_orders_product_id on public.production_orders(product_id);
+
+-- Genealogy indexes (audit trail)
+create index if not exists idx_genealogy_records_entity on public.genealogy_records(entity_type, entity_id);
+create index if not exists idx_genealogy_records_recorded_at on public.genealogy_records(recorded_at desc);
+
+-- Audit logs indexes
+create index if not exists idx_audit_logs_entity on public.audit_logs(entity_type, entity_id);
+create index if not exists idx_audit_logs_timestamp on public.audit_logs(timestamp desc);
 
 -- ================================================================
 -- END OF AUTHORITATIVE SCHEMA

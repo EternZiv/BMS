@@ -77,33 +77,39 @@ export const InventoryView: React.FC = () => {
     setLoading(true);
     try {
       if (activeTab === 'CELLS') {
-        // Fetch all cells (no limit) so used cells are always visible
-        const res = await api.getCells({
-          search: search || undefined,
-          status: undefined,
-          usedOnly: cellsView === 'USED' ? true : undefined,
-        });
+        const serverStatus = ['AVAILABLE', 'RESERVED', 'IN_PROCESS', 'QUARANTINED', 'FAILED'].includes(statusFilter)
+          ? statusFilter
+          : undefined;
+        const [res, counts] = await Promise.all([
+          api.getCells({
+            search: search || undefined,
+            status: serverStatus,
+            usedOnly: cellsView === 'USED' ? true : undefined,
+            limit: 50,
+          }),
+          !search && !statusFilter
+            ? api.getCellCounts()
+            : Promise.resolve({ total: allCellsCount, used: usedCellsCount, available: 0, quarantined: 0 }),
+        ]);
         setCells(res);
-        // Also fetch counts for the summary tiles
+        setAllCellsCount(counts.total);
+        setUsedCellsCount(counts.used);
         if (!search && !statusFilter) {
-          const allRes = cellsView === 'ALL' ? res : await api.getCells();
-          setAllCells(allRes);
-          setAllCellsCount(allRes.length);
-          setUsedCellsCount(allRes.filter(cell => Boolean(cell.reservedForBatteryId)).length);
+          setAllCells(cellsView === 'USED' ? res : []);
+        }
+
+        if (cellsView === 'USED') {
           try {
-            setModules(await api.getModules());
-          } catch (error) {
-            console.error('Failed to load module inventory', error);
-          }
-          try {
-            setBatteries(await api.getBatteries());
-          } catch (error) {
-            console.error('Failed to load battery inventory', error);
-          }
-          try {
-            const buckets = await api.getCellInventoryBuckets();
+            const [loadedModules, loadedBatteries, buckets] = await Promise.all([
+              api.getModules(),
+              api.getBatteries(),
+              api.getCellInventoryBuckets(),
+            ]);
+            setModules(loadedModules);
+            setBatteries(loadedBatteries);
             setCellBuckets(buckets);
-          } catch {
+          } catch (error) {
+            console.error('Failed to load used-cell relationships', error);
             setCellBuckets([]);
           }
         }
@@ -127,13 +133,31 @@ export const InventoryView: React.FC = () => {
     }
   };
 
+  const normalizeSerialList = (input: string): string[] => {
+    const seen = new Set<string>();
+    return input
+      .split(/[\n,;]+/)
+      .map(value => value.trim())
+      .filter(Boolean)
+      .filter(value => {
+        const key = value.toUpperCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  };
+
   const handleIngestBmu = async (e: React.FormEvent) => {
     e.preventDefault();
     setIngestingBmu(true);
     try {
-      const serialNumbers = bmuSerials.split(/[\n,;]+/).map(value => value.trim()).filter(Boolean);
-      if (serialNumbers.length > 0 && serialNumbers.length !== bmuCount) throw new Error(`Enter exactly ${bmuCount} BMU serials, or leave serials empty to generate them.`);
-      const res = await api.createBmuBatch({ count: bmuCount, model: bmuModel, manufacturer: bmuManufacturer, batchNumber: bmuBatchNumber, serialNumbers });
+      const serialNumbers = normalizeSerialList(bmuSerials);
+      if (serialNumbers.length === 0) {
+        throw new Error('Enter at least one BMU serial or leave the field empty to auto-generate values.');
+      }
+      const finalCount = serialNumbers.length;
+      setBmuCount(finalCount);
+      const res = await api.createBmuBatch({ count: finalCount, model: bmuModel, manufacturer: bmuManufacturer, batchNumber: bmuBatchNumber, serialNumbers });
       addNotification('success', 'BMU Batch Received', `Successfully ingested ${res.count} ${bmuModel} controllers`);
       setShowBmuModal(false);
       triggerRefresh();
@@ -149,9 +173,13 @@ export const InventoryView: React.FC = () => {
     e.preventDefault();
     setIngestingBms(true);
     try {
-      const serialNumbers = bmsSerials.split(/[\n,;]+/).map(value => value.trim()).filter(Boolean);
-      if (serialNumbers.length > 0 && serialNumbers.length !== bmsCount) throw new Error(`Enter exactly ${bmsCount} BMS serials, or leave serials empty to generate them.`);
-      const res = await api.createBmsBatch({ count: bmsCount, model: bmsModel, supplier: bmsManufacturer || 'Unknown Supplier', manufacturer: bmsManufacturer, batchNumber: bmsBatchNumber, serialNumbers });
+      const serialNumbers = normalizeSerialList(bmsSerials);
+      if (serialNumbers.length === 0) {
+        throw new Error('Enter at least one BMS serial or leave the field empty to auto-generate values.');
+      }
+      const finalCount = serialNumbers.length;
+      setBmsCount(finalCount);
+      const res = await api.createBmsBatch({ count: finalCount, model: bmsModel, supplier: bmsManufacturer || 'Unknown Supplier', manufacturer: bmsManufacturer, batchNumber: bmsBatchNumber, serialNumbers });
       addNotification('success', 'BMS Batch Received', `Successfully ingested ${res.count} ${bmsModel} controllers`);
       setShowBmsModal(false);
       triggerRefresh();
@@ -879,10 +907,23 @@ export const InventoryView: React.FC = () => {
                 <input value={bmsBatchNumber} onChange={e => setBmsBatchNumber(e.target.value)} placeholder="Supplier batch number" className="px-3.5 py-2.5 text-xs border border-slate-200 rounded-xl" required />
               </div>
               <div className="space-y-2">
-                <label className="block text-xs font-bold text-slate-700">Serial / Barcode Values</label>
-                <div className="min-h-12 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono text-slate-600">
-                  {bmsSerials || 'Scan each BMS serial below'}
-                </div>
+                <label className="block text-xs font-bold text-slate-700">Bulk Paste Serial / Barcode Values</label>
+                <textarea
+                  value={bmsSerials}
+                  onChange={e => {
+                    const next = e.target.value;
+                    setBmsSerials(next);
+                    const parsed = next
+                      .split(/[\n,;]+/)
+                      .map(value => value.trim())
+                      .filter(Boolean)
+                      .filter((value, index, arr) => arr.findIndex(item => item.toUpperCase() === value.toUpperCase()) === index);
+                    if (parsed.length > 0) setBmsCount(parsed.length);
+                  }}
+                  rows={5}
+                  placeholder="Paste serials one per line or separated by commas"
+                  className="w-full min-h-28 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500 resize-none"
+                />
                 <button type="button" onClick={() => setSerialScanner('BMS')} className="flex items-center gap-2 px-3 py-2 text-xs font-bold text-emerald-700 border border-emerald-200 rounded-lg"><QrCode className="w-4 h-4" /> Scan BMS Serial</button>
               </div>
 
@@ -913,8 +954,9 @@ export const InventoryView: React.FC = () => {
             <div className="flex items-center space-x-3"><span className="p-2.5 bg-emerald-50 text-emerald-700 rounded-xl border border-emerald-100"><Cpu className="w-5 h-5" /></span><div><h3 className="text-base font-black text-slate-900">Receive BMU Inventory Batch</h3><p className="text-xs text-slate-500">Ingest certified Battery Management Unit controllers</p></div></div>
             <form onSubmit={handleIngestBmu} className="space-y-4 pt-2">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3"><input value={bmuManufacturer} onChange={e => setBmuManufacturer(e.target.value)} placeholder="Manufacturer name" className="px-3.5 py-2.5 text-xs border border-slate-200 rounded-xl" required /><input value={bmuBatchNumber} onChange={e => setBmuBatchNumber(e.target.value)} placeholder="Supplier batch number" className="px-3.5 py-2.5 text-xs border border-slate-200 rounded-xl" required /></div>
-              <div className="space-y-2"><label className="block text-xs font-bold text-slate-700">Serial / Barcode Values</label><div className="min-h-12 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono text-slate-600">{bmuSerials || 'Scan each BMU serial below'}</div><button type="button" onClick={() => setSerialScanner('BMU')} className="flex items-center gap-2 px-3 py-2 text-xs font-bold text-emerald-700 border border-emerald-200 rounded-lg"><QrCode className="w-4 h-4" /> Scan BMU Serial</button></div>
+              <div className="space-y-2"><label className="block text-xs font-bold text-slate-700">Bulk Paste Serial / Barcode Values</label><textarea value={bmuSerials} onChange={e => { const next = e.target.value; setBmuSerials(next); const parsed = next.split(/[\n,;]+/).map(value => value.trim()).filter(Boolean); if (parsed.length > 0) setBmuCount(parsed.length); }} rows={5} placeholder="Paste serials one per line or separated by commas" className="w-full min-h-28 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-mono text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500 resize-none" /></div>
               <div><label className="block text-xs font-bold text-slate-700 mb-1">Batch Quantity (Units)</label><input type="number" min="1" value={bmuCount} onChange={e => setBmuCount(Math.max(1, parseInt(e.target.value) || 1))} className="w-full px-3.5 py-2.5 text-xs font-mono border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500" required /></div>
+              <button type="button" onClick={() => setSerialScanner('BMU')} className="flex items-center gap-2 px-3 py-2 text-xs font-bold text-emerald-700 border border-emerald-200 rounded-lg"><QrCode className="w-4 h-4" /> Scan BMU Serial</button>
               <div className="flex justify-end space-x-2 pt-2 border-t border-slate-100"><button type="button" onClick={() => setShowBmuModal(false)} className="px-4 py-2 text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors">Cancel</button><button type="submit" disabled={ingestingBmu} className="px-5 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-300 rounded-xl shadow-xs transition-colors">{ingestingBmu ? 'Receiving...' : `Receive ${bmuCount} Units`}</button></div>
             </form>
           </div>
