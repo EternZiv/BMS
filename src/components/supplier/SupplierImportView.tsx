@@ -313,15 +313,17 @@ export const SupplierImportView: React.FC = () => {
         const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, '0')}`;
         
         const normalizedRows = Array.from(batteryGroups.entries()).map((entry, index) => {
-          const bmuSerial = entry[1].bmuSerial;
+          const group = entry[1];
+          const bmuSerial = group.bmuSerial;
           const batterySerialNumber = `P2G-7K5-${yymm}-${String(index + 1).padStart(6, '0')}`;
 
           return {
-            index: entry[1].firstRowIndex,
+            index: group.firstRowIndex,
             batterySerialNumber,
             bmuSerialNumber: bmuSerial,
-            qrCodeValue: entry[1].qrCodes.length > 0 ? entry[1].qrCodes[0] : '',
-            cellCount: entry[1].qrCodes.length,
+            qrCodeValue: group.qrCodes.length > 0 ? group.qrCodes[0] : '',
+            cellQrCodes: group.qrCodes,
+            cellCount: group.qrCodes.length,
             isValid: true,
             errors: [] as string[],
           };
@@ -344,6 +346,7 @@ export const SupplierImportView: React.FC = () => {
     const payloadRows = batteryParsedRows.filter(row => row.isValid).map(row => ({
       batterySerialNumber: row.batterySerialNumber,
       bmuSerialNumber: row.bmuSerialNumber,
+      cellQrCodes: Array.isArray(row.cellQrCodes) ? row.cellQrCodes : (row.qrCodeValue ? [row.qrCodeValue] : []),
     }));
 
     if (payloadRows.length === 0) {

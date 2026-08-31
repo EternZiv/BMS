@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCompletedBatteryReleasePlan, buildModulePlan, dedupeModuleCellAssignments, normalizeBatteryProductTemplate, validateBulkBatteryRows } from './bulkBatteryInitializer';
+import { buildCompletedBatteryReleasePlan, buildModulePlan, createBulkBatteryInitialization, dedupeModuleCellAssignments, normalizeBatteryProductTemplate, validateBulkBatteryRows } from './bulkBatteryInitializer';
 
 test('bulk battery rows validate unique serial numbers and required field mapping', () => {
   const rows = [
@@ -78,6 +78,54 @@ test('completed battery release plan assigns passing welding and qc status and m
   assert.equal(plan.batteryTest.passed, true);
   assert.equal(plan.release.status, 'RELEASED');
   assert.equal(plan.release.progressPercent, 100);
+});
+
+test('exact battery row mapping keeps the uploaded BMU and cell group together', async () => {
+  const rows = [
+    {
+      batterySerialNumber: 'P2G-7K5-2409-000001',
+      bmuSerialNumber: 'P2G-BMU-010',
+      cellQrCodes: Array.from({ length: 24 }, (_, index) => `QR-${index + 1}`),
+    },
+  ];
+  const availableBmUs = [
+    { id: 'bmu-1', serialNumber: 'P2G-BMU-001', status: 'AVAILABLE' },
+    { id: 'bmu-2', serialNumber: 'P2G-BMU-002', status: 'AVAILABLE' },
+    { id: 'bmu-3', serialNumber: 'P2G-BMU-003', status: 'AVAILABLE' },
+    { id: 'bmu-10', serialNumber: 'P2G-BMU-010', status: 'AVAILABLE' },
+  ];
+  const availableCells = Array.from({ length: 24 }, (_, index) => ({
+    id: `cell-${index + 1}`,
+    internalSerial: `CELL-${index + 1}`,
+    supplierBarcode: `QR-${index + 1}`,
+    status: 'AVAILABLE',
+    reservedForBatteryId: null,
+    reservedForOrderId: null,
+    assignedToModuleId: null,
+  }));
+  const product = {
+    id: 'prod-1',
+    name: 'P2G-HV7.5KWH',
+    sku: 'P2G-HV7.5KWH',
+    totalCells: 24,
+    numModules: 2,
+    cellsPerModule: 12,
+  };
+
+  const plan = await createBulkBatteryInitialization({
+    rows,
+    products: [product],
+    availableBmUs,
+    availableCells,
+    userId: 'user-1',
+  });
+
+  assert.equal(plan.batteries[0].bmu.serialNumber, 'P2G-BMU-010');
+  assert.deepEqual(
+    plan.batteries[0].cells.map(cell => cell.supplierBarcode),
+    Array.from({ length: 24 }, (_, index) => `QR-${index + 1}`)
+  );
+  assert.deepEqual(plan.batteries[0].modules.map(module => module.cells.length), [12, 12]);
 });
 
 test('module cell assignment deduplicates reused cell ids before insert', () => {

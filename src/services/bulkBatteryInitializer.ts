@@ -1,6 +1,8 @@
 export type BulkBatteryRow = {
   batterySerialNumber?: string;
   bmuSerialNumber?: string;
+  cellQrCodes?: string[];
+  cellIds?: string[];
   [key: string]: any;
 };
 
@@ -33,6 +35,8 @@ export type AvailableBmuLike = {
 export type AvailableCellLike = {
   id: string;
   internalSerial: string;
+  supplierBarcode?: string;
+  qrCode?: string;
   status?: string;
   reservedForBatteryId?: string | null;
   reservedForOrderId?: string | null;
@@ -41,6 +45,100 @@ export type AvailableCellLike = {
 
 export function normalizeBatterySerial(value: string): string {
   return String(value ?? '').trim().toUpperCase();
+}
+
+function normalizeBatteryIdentifier(value: string): string {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function resolveExplicitBatteryAssignments(
+  rows: BulkBatteryRow[],
+  availableBmUs: AvailableBmuLike[],
+  availableCells: AvailableCellLike[],
+  productTemplate: ProductTemplateLike,
+): Array<{ batterySerial: string; bmu?: AvailableBmuLike; cells: AvailableCellLike[]; modules: Array<{ moduleIndex: number; cells: AvailableCellLike[] }> }> {
+  const bmuBySerial = new Map<string, AvailableBmuLike>();
+  for (const item of availableBmUs) {
+    const serial = normalizeBatteryIdentifier(item.serialNumber);
+    if (!serial) continue;
+    if (!bmuBySerial.has(serial)) bmuBySerial.set(serial, item);
+  }
+
+  const usedBmuIds = new Set<string>();
+  const usedCellIds = new Set<string>();
+
+  return rows.map((row, index) => {
+    const batterySerial = normalizeBatterySerial(row.batterySerialNumber ?? '');
+    const requestedCellRefs = Array.isArray(row.cellQrCodes) && row.cellQrCodes.length > 0
+      ? row.cellQrCodes
+      : Array.isArray(row.cellIds) && row.cellIds.length > 0
+        ? row.cellIds
+        : [];
+
+    const requestedCells = requestedCellRefs.map((value: string) => normalizeBatteryIdentifier(value)).filter(Boolean);
+    const matchedCells = requestedCells.length > 0 ? requestedCells.map(ref => {
+      const match = availableCells.find(cell => {
+        const candidates = [
+          cell.id,
+          cell.internalSerial,
+          cell.supplierBarcode,
+          cell.qrCode,
+        ].map(value => normalizeBatteryIdentifier(String(value ?? '')));
+        return candidates.includes(ref);
+      });
+      if (!match) {
+        throw new Error(`Battery ${batterySerial} references cell ${ref} that is not available in inventory.`);
+      }
+      return match;
+    }) : [];
+
+    if (requestedCells.length > 0 && matchedCells.length !== requestedCells.length) {
+      throw new Error(`Battery ${batterySerial} could not resolve all mapped cells. Expected ${requestedCells.length} but found ${matchedCells.length}.`);
+    }
+
+    if (requestedCells.length > 0 && matchedCells.length !== productTemplate.totalCells) {
+      throw new Error(`Battery ${batterySerial} must use exactly ${productTemplate.totalCells} cells, but ${matchedCells.length} were supplied.`);
+    }
+
+    const selectedCells = requestedCells.length > 0 ? matchedCells : [];
+    for (const cell of selectedCells) {
+      if (cell.id && usedCellIds.has(cell.id)) {
+        throw new Error(`Cell ${cell.internalSerial || cell.id} is assigned to more than one battery in the uploaded batch.`);
+      }
+      if (cell.id) usedCellIds.add(cell.id);
+    }
+
+    let assignedBmu: AvailableBmuLike | undefined;
+    if (row.bmuSerialNumber) {
+      const explicitBmuRef = normalizeBatteryIdentifier(row.bmuSerialNumber);
+      const match = bmuBySerial.get(explicitBmuRef);
+      if (!match) {
+        throw new Error(`BMU serial ${row.bmuSerialNumber} was not found in the available BMU inventory.`);
+      }
+      if (usedBmuIds.has(match.id)) {
+        throw new Error(`BMU ${match.serialNumber} is already assigned to another battery in the uploaded batch.`);
+      }
+      assignedBmu = match;
+      usedBmuIds.add(match.id);
+    }
+
+    const cellsForBattery = requestedCells.length > 0 ? selectedCells : [];
+    const moduleAssignments = Array.from({ length: productTemplate.numModules }, (_, moduleIndex) => {
+      const start = moduleIndex * productTemplate.cellsPerModule;
+      const end = start + productTemplate.cellsPerModule;
+      return {
+        moduleIndex,
+        cells: cellsForBattery.slice(start, end),
+      };
+    });
+
+    return {
+      batterySerial,
+      bmu: assignedBmu,
+      cells: cellsForBattery,
+      modules: moduleAssignments,
+    };
+  });
 }
 
 export function validateBulkBatteryRows(rows: BulkBatteryRow[]): BulkBatteryValidationResult {
@@ -334,38 +432,68 @@ export async function createBulkBatteryInitialization({
 
   const productTemplate = resolveBatteryTemplate(products, '7.5');
   const requiredBmuCount = rows.length;
-  const bmuPool = selectAvailableBmUs(availableBmUs, requiredBmuCount);
   const totalRequiredCells = productTemplate.totalCells * rows.length;
-  const selectedCells = selectRequiredCells(availableCells, totalRequiredCells);
+  const hasExplicitCellMaps = rows.some(row => Array.isArray(row.cellQrCodes) && row.cellQrCodes.length > 0);
+  const hasExplicitBmuMaps = rows.some(row => String(row.bmuSerialNumber ?? '').trim().length > 0);
+  const bmuPool = hasExplicitBmuMaps
+    ? availableBmUs.filter(item => {
+        const status = String(item.status ?? '').toUpperCase();
+        const unavailableStatuses = ['QUARANTINED', 'FAILED', 'ARCHIVED'];
+        return !unavailableStatuses.includes(status) && !item.reservedForBatteryId;
+      })
+    : selectAvailableBmUs(availableBmUs, requiredBmuCount);
+  const selectedCells = hasExplicitCellMaps
+    ? availableCells.filter(item => {
+        const status = String(item.status ?? '').toUpperCase();
+        const unavailableStatuses = ['QUARANTINED', 'REJECTED', 'RESERVED', 'MODULE_ASSIGNED'];
+        return !unavailableStatuses.includes(status)
+          && !item.reservedForBatteryId
+          && !item.reservedForOrderId
+          && !item.assignedToModuleId;
+      })
+    : selectRequiredCells(availableCells, totalRequiredCells);
+  const batteryPlan = hasExplicitCellMaps
+    ? resolveExplicitBatteryAssignments(rows, bmuPool, selectedCells, productTemplate).map((battery, index) => ({
+        rowIndex: index + 2,
+        batterySerial: battery.batterySerial,
+        bmu: battery.bmu,
+        cells: battery.cells,
+        modules: battery.modules,
+        genealogy: {
+          batterySerial: battery.batterySerial,
+          bmuId: battery.bmu?.id,
+          bmuSerial: battery.bmu?.serialNumber,
+          cellIds: battery.cells.map(cell => cell.id),
+        },
+      }))
+    : rows.map((row, index) => {
+        const batterySerial = normalizeBatterySerial(row.batterySerialNumber ?? '');
+        const assignedBmu = bmuPool[index];
+        const cellStart = index * productTemplate.totalCells;
+        const cellSlice = selectedCells.slice(cellStart, cellStart + productTemplate.totalCells);
+        if (cellSlice.length !== productTemplate.totalCells) {
+          throw new Error(`Battery ${batterySerial} could not allocate the required ${productTemplate.totalCells} cells.`);
+        }
 
-  const batteryPlan = rows.map((row, index) => {
-    const batterySerial = normalizeBatterySerial(row.batterySerialNumber ?? '');
-    const assignedBmu = bmuPool[index];
-    const cellStart = index * productTemplate.totalCells;
-    const cellSlice = selectedCells.slice(cellStart, cellStart + productTemplate.totalCells);
-    if (cellSlice.length !== productTemplate.totalCells) {
-      throw new Error(`Battery ${batterySerial} could not allocate the required ${productTemplate.totalCells} cells.`);
-    }
+        const moduleAssignments = Array.from({ length: productTemplate.numModules }, (_, moduleIndex) => ({
+          moduleIndex,
+          cells: cellSlice.slice(moduleIndex * productTemplate.cellsPerModule, (moduleIndex + 1) * productTemplate.cellsPerModule),
+        }));
 
-    const moduleAssignments = Array.from({ length: productTemplate.numModules }, (_, moduleIndex) => ({
-      moduleIndex,
-      cells: cellSlice.slice(moduleIndex * productTemplate.cellsPerModule, (moduleIndex + 1) * productTemplate.cellsPerModule),
-    }));
-
-    return {
-      rowIndex: index + 2,
-      batterySerial,
-      bmu: assignedBmu,
-      cells: cellSlice,
-      modules: moduleAssignments,
-      genealogy: {
-        batterySerial,
-        bmuId: assignedBmu?.id,
-        bmuSerial: assignedBmu?.serialNumber,
-        cellIds: cellSlice.map(cell => cell.id),
-      },
-    };
-  });
+        return {
+          rowIndex: index + 2,
+          batterySerial,
+          bmu: assignedBmu,
+          cells: cellSlice,
+          modules: moduleAssignments,
+          genealogy: {
+            batterySerial,
+            bmuId: assignedBmu?.id,
+            bmuSerial: assignedBmu?.serialNumber,
+            cellIds: cellSlice.map(cell => cell.id),
+          },
+        };
+      });
 
   return {
     valid: true,

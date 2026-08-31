@@ -44,6 +44,13 @@ export const InventoryView: React.FC = () => {
   const [modules, setModules] = useState<ModuleItem[]>([]);
   const [batteries, setBatteries] = useState<BatteryUnit[]>([]);
   const [loading, setLoading] = useState(true);
+  const [selectedIds, setSelectedIds] = useState<Record<Tab, string[]>>({
+    CELLS: [],
+    BMS: [],
+    BMU: [],
+    MODULES: [],
+    BATTERIES: [],
+  });
 
   // BMS Ingestion Modal
   const [showBmsModal, setShowBmsModal] = useState(false);
@@ -256,6 +263,64 @@ export const InventoryView: React.FC = () => {
 
   const displayedCells = filteredCells.slice(0, cellDisplayLimit);
 
+  const getTabItems = (tab: Tab): Array<{ id: string }> => {
+    if (tab === 'CELLS') return filteredCells;
+    if (tab === 'BMS') return filteredBms;
+    if (tab === 'BMU') return filteredBmus;
+    if (tab === 'MODULES') return filteredModules;
+    return filteredBatteries;
+  };
+
+  const toggleSelectItem = (tab: Tab, id: string) => {
+    setSelectedIds(prev => {
+      const current = prev[tab] ?? [];
+      const next = current.includes(id) ? current.filter(item => item !== id) : [...current, id];
+      return { ...prev, [tab]: next };
+    });
+  };
+
+  const toggleSelectAll = (tab: Tab, items: Array<{ id: string }>) => {
+    if (!items.length) return;
+
+    setSelectedIds(prev => {
+      const current = prev[tab] ?? [];
+      const ids = items.map(item => item.id);
+      const allSelected = ids.every(id => current.includes(id));
+      const next = allSelected ? current.filter(id => !ids.includes(id)) : Array.from(new Set([...current, ...ids]));
+      return { ...prev, [tab]: next };
+    });
+  };
+
+  const activeTabSelectedCount = selectedIds[activeTab]?.length ?? 0;
+
+  const handleDeleteSelected = async () => {
+    const ids = selectedIds[activeTab] ?? [];
+    if (ids.length === 0) return;
+
+    const itemLabel = activeTab.slice(0, -1).toLowerCase();
+    if (!window.confirm(`Delete ${ids.length} selected ${itemLabel}${ids.length > 1 ? 's' : ''}?`)) return;
+
+    try {
+      if (activeTab === 'CELLS') {
+        await Promise.all(ids.map(id => api.deleteCell(id)));
+      } else if (activeTab === 'BMS') {
+        await Promise.all(ids.map(id => api.deleteBms(id)));
+      } else if (activeTab === 'BMU') {
+        await Promise.all(ids.map(id => api.deleteBmu(id)));
+      } else if (activeTab === 'MODULES') {
+        await Promise.all(ids.map(id => api.deleteModule(id)));
+      } else if (activeTab === 'BATTERIES') {
+        await Promise.all(ids.map(id => api.deleteBattery(id)));
+      }
+
+      setSelectedIds(prev => ({ ...prev, [activeTab]: [] }));
+      triggerRefresh();
+      addNotification('success', 'Delete Complete', `Deleted ${ids.length} selected items.`);
+    } catch (err: any) {
+      addNotification('error', 'Delete Failed', err.message || 'Unable to remove selected inventory item(s).');
+    }
+  };
+
   return (
     <div className="flex-1 p-6 space-y-6 overflow-y-auto max-w-7xl mx-auto">
       {/* Header */}
@@ -330,6 +395,25 @@ export const InventoryView: React.FC = () => {
             )}
           </select>
 
+          <button
+            type="button"
+            onClick={() => toggleSelectAll(activeTab, getTabItems(activeTab))}
+            className="px-3.5 py-2.5 border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 text-xs font-bold rounded-xl transition-colors shrink-0"
+          >
+            {activeTabSelectedCount > 0 ? 'Clear all' : 'Select all'}
+          </button>
+          {activeTabSelectedCount > 0 && (
+            <>
+              <button
+                type="button"
+                onClick={() => void handleDeleteSelected()}
+                className="px-3.5 py-2.5 bg-red-600 hover:bg-red-500 text-white text-xs font-bold rounded-xl transition-colors shrink-0"
+              >
+                Delete selected
+              </button>
+              <span className="text-[11px] font-medium text-slate-500">{activeTabSelectedCount} selected</span>
+            </>
+          )}
           {activeTab === 'BMS' && (
             <button
               onClick={() => setShowBmsModal(true)}
@@ -437,6 +521,14 @@ export const InventoryView: React.FC = () => {
             <table className="w-full text-left text-xs font-mono">
               <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200 font-sans">
                 <tr>
+                  <th className="px-3 py-3 w-10">
+                    <input
+                      type="checkbox"
+                      checked={filteredCells.length > 0 && filteredCells.every(cell => selectedIds.CELLS.includes(cell.id))}
+                      onChange={() => toggleSelectAll('CELLS', filteredCells)}
+                      className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                    />
+                  </th>
                   <th className="px-5 py-3">Internal Serial</th>
                   <th className="px-5 py-3">Supplier Barcode</th>
                   <th className="px-5 py-3">Manufacturer</th>
@@ -451,6 +543,14 @@ export const InventoryView: React.FC = () => {
               <tbody className="divide-y divide-slate-100">
                 {displayedCells.map(cell => (
                   <tr key={cell.id} className="hover:bg-slate-50/70 transition-colors">
+                    <td className="px-3 py-3.5">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.CELLS.includes(cell.id)}
+                        onChange={() => toggleSelectItem('CELLS', cell.id)}
+                        className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                      />
+                    </td>
                     <td className="px-5 py-3.5 font-bold text-slate-900">{cell.internalSerial}</td>
                     <td className="px-5 py-3.5 text-slate-500 text-[11px]">{cell.supplierBarcode}</td>
                     <td className="px-5 py-3.5 text-slate-700 font-sans">{cell.supplierName}</td>
@@ -535,6 +635,14 @@ export const InventoryView: React.FC = () => {
             <table className="w-full text-left text-xs font-mono">
               <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200 font-sans">
                 <tr>
+                  <th className="px-3 py-3 w-10">
+                    <input
+                      type="checkbox"
+                      checked={filteredBms.length > 0 && filteredBms.every(item => selectedIds.BMS.includes(item.id))}
+                      onChange={() => toggleSelectAll('BMS', filteredBms)}
+                      className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                    />
+                  </th>
                   <th className="px-5 py-3">Serial Number</th>
                   <th className="px-5 py-3">Model</th>
                   <th className="px-5 py-3">Protocol</th>
@@ -547,6 +655,14 @@ export const InventoryView: React.FC = () => {
               <tbody className="divide-y divide-slate-100">
                 {filteredBms.map(b => (
                   <tr key={b.id} className="hover:bg-slate-50/70 transition-colors">
+                    <td className="px-3 py-3.5">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.BMS.includes(b.id)}
+                        onChange={() => toggleSelectItem('BMS', b.id)}
+                        className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                      />
+                    </td>
                     <td className="px-5 py-3.5 font-bold text-slate-900">{b.serialNumber}</td>
                     <td className="px-5 py-3.5 text-slate-700 font-sans">{b.model}</td>
                     <td className="px-5 py-3.5 font-bold text-emerald-700">{b.protocol}</td>
@@ -626,6 +742,14 @@ export const InventoryView: React.FC = () => {
             <table className="w-full text-left text-xs font-mono">
               <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200 font-sans">
                 <tr>
+                  <th className="px-3 py-3 w-10">
+                    <input
+                      type="checkbox"
+                      checked={filteredBmus.length > 0 && filteredBmus.every(item => selectedIds.BMU.includes(item.id))}
+                      onChange={() => toggleSelectAll('BMU', filteredBmus)}
+                      className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                    />
+                  </th>
                   <th className="px-5 py-3">Serial Number</th>
                   <th className="px-5 py-3">Model</th>
                   <th className="px-5 py-3">Manufacturer</th>
@@ -637,6 +761,14 @@ export const InventoryView: React.FC = () => {
               <tbody className="divide-y divide-slate-100">
                 {filteredBmus.map(b => (
                   <tr key={b.id} className="hover:bg-slate-50/70 transition-colors">
+                    <td className="px-3 py-3.5">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.BMU.includes(b.id)}
+                        onChange={() => toggleSelectItem('BMU', b.id)}
+                        className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                      />
+                    </td>
                     <td className="px-5 py-3.5 font-bold text-slate-900">{b.serialNumber}</td>
                     <td className="px-5 py-3.5 text-slate-700 font-sans">{b.model}</td>
                     <td className="px-5 py-3.5 text-slate-600 font-sans">{b.manufacturer || 'N/A'}</td>
@@ -662,6 +794,14 @@ export const InventoryView: React.FC = () => {
             <table className="w-full text-left text-xs font-mono">
               <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200 font-sans">
                 <tr>
+                  <th className="px-3 py-3 w-10">
+                    <input
+                      type="checkbox"
+                      checked={filteredModules.length > 0 && filteredModules.every(item => selectedIds.MODULES.includes(item.id))}
+                      onChange={() => toggleSelectAll('MODULES', filteredModules)}
+                      className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                    />
+                  </th>
                   <th className="px-5 py-3">Module Serial</th>
                   <th className="px-5 py-3">Assigned Battery</th>
                   <th className="px-5 py-3">Cells Count</th>
@@ -675,6 +815,14 @@ export const InventoryView: React.FC = () => {
               <tbody className="divide-y divide-slate-100">
                 {filteredModules.map(m => (
                   <tr key={m.id} className="hover:bg-slate-50/70 transition-colors">
+                    <td className="px-3 py-3.5">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.MODULES.includes(m.id)}
+                        onChange={() => toggleSelectItem('MODULES', m.id)}
+                        className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                      />
+                    </td>
                     <td className="px-5 py-3.5 font-bold text-slate-900">{m.serialNumber}</td>
                     <td className="px-5 py-3.5 text-slate-600">{m.batteryId || 'UNALLOCATED'}</td>
                     <td className="px-5 py-3.5 font-bold text-slate-800">{m.cells?.length ?? 0} cells</td>
@@ -759,6 +907,14 @@ export const InventoryView: React.FC = () => {
             <table className="w-full text-left text-xs font-mono">
               <thead className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200 font-sans">
                 <tr>
+                  <th className="px-3 py-3 w-10">
+                    <input
+                      type="checkbox"
+                      checked={filteredBatteries.length > 0 && filteredBatteries.every(item => selectedIds.BATTERIES.includes(item.id))}
+                      onChange={() => toggleSelectAll('BATTERIES', filteredBatteries)}
+                      className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                    />
+                  </th>
                   <th className="px-5 py-3">Pack Serial</th>
                   <th className="px-5 py-3">Product Name</th>
                   <th className="px-5 py-3">Modules Count</th>
@@ -773,6 +929,14 @@ export const InventoryView: React.FC = () => {
               <tbody className="divide-y divide-slate-100">
                 {filteredBatteries.map(b => (
                   <tr key={b.id} className="hover:bg-slate-50/70 transition-colors">
+                    <td className="px-3 py-3.5">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.BATTERIES.includes(b.id)}
+                        onChange={() => toggleSelectItem('BATTERIES', b.id)}
+                        className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                      />
+                    </td>
                     <td className="px-5 py-3.5 font-bold text-slate-900">{b.serialNumber}</td>
                     <td className="px-5 py-3.5 text-slate-700 font-sans font-semibold">{b.productName}</td>
                     <td className="px-5 py-3.5">{b.modules?.length ?? 0} Modules</td>
