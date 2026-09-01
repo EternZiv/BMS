@@ -36,6 +36,7 @@ export type AvailableCellLike = {
   id: string;
   internalSerial: string;
   supplierBarcode?: string;
+  /** QR code scanned from cell — may be same as supplierBarcode in many workflows */
   qrCode?: string;
   status?: string;
   reservedForBatteryId?: string | null;
@@ -67,75 +68,111 @@ function resolveExplicitBatteryAssignments(
   const usedBmuIds = new Set<string>();
   const usedCellIds = new Set<string>();
 
-  return rows.map((row, index) => {
+  return rows.map((row) => {
     const batterySerial = normalizeBatterySerial(row.batterySerialNumber ?? '');
-    const requestedCellRefs = Array.isArray(row.cellQrCodes) && row.cellQrCodes.length > 0
-      ? row.cellQrCodes
-      : Array.isArray(row.cellIds) && row.cellIds.length > 0
-        ? row.cellIds
-        : [];
 
-    const requestedCells = requestedCellRefs.map((value: string) => normalizeBatteryIdentifier(value)).filter(Boolean);
-    const matchedCells = requestedCells.length > 0 ? requestedCells.map(ref => {
+    // Resolve requested cell references — prefer cellQrCodes then cellIds
+    const requestedCellRefs: string[] = (
+      Array.isArray(row.cellQrCodes) && row.cellQrCodes.length > 0
+        ? row.cellQrCodes
+        : Array.isArray(row.cellIds) && row.cellIds.length > 0
+          ? row.cellIds
+          : []
+    ).map((v: string) => normalizeBatteryIdentifier(v)).filter(Boolean);
+
+    // Detect duplicate cell references within this battery — hard error, not warning
+    const seenRefs = new Set<string>();
+    const duplicateRefs: string[] = [];
+    for (const ref of requestedCellRefs) {
+      if (seenRefs.has(ref)) duplicateRefs.push(ref);
+      seenRefs.add(ref);
+    }
+    if (duplicateRefs.length > 0) {
+      throw new Error(
+        `Battery ${batterySerial} has ${duplicateRefs.length} duplicate cell QR code(s): ` +
+        `${duplicateRefs.slice(0, 5).join(', ')}${duplicateRefs.length > 5 ? '...' : ''}. ` +
+        `Each cell must appear exactly once per battery.`,
+      );
+    }
+
+    // Match each QR code reference against available cell pool
+    const matchedCells = requestedCellRefs.map(ref => {
       const match = availableCells.find(cell => {
         const candidates = [
           cell.id,
           cell.internalSerial,
           cell.supplierBarcode,
           cell.qrCode,
-        ].map(value => normalizeBatteryIdentifier(String(value ?? '')));
+        ].map(v => normalizeBatteryIdentifier(String(v ?? '')));
         return candidates.includes(ref);
       });
       if (!match) {
-        throw new Error(`Battery ${batterySerial} references cell ${ref} that is not available in inventory.`);
+        throw new Error(
+          `Battery ${batterySerial} references cell '${ref}' that was not found in available inventory. ` +
+          `Ensure the cell is imported via the Supplier Manifest before importing batteries.`,
+        );
       }
       return match;
-    }) : [];
+    });
 
-    if (requestedCells.length > 0 && matchedCells.length !== requestedCells.length) {
-      throw new Error(`Battery ${batterySerial} could not resolve all mapped cells. Expected ${requestedCells.length} but found ${matchedCells.length}.`);
+    // Validate all matched cells have IDs
+    const invalidCells = matchedCells.filter(cell => !cell.id);
+    if (invalidCells.length > 0) {
+      throw new Error(
+        `Battery ${batterySerial} has ${invalidCells.length} matched cells with missing IDs — data integrity issue.`,
+      );
     }
 
-    if (requestedCells.length > 0 && matchedCells.length !== productTemplate.totalCells) {
-      throw new Error(`Battery ${batterySerial} must use exactly ${productTemplate.totalCells} cells, but ${matchedCells.length} were supplied.`);
+    // Verify exact cell count matches product template
+    if (matchedCells.length !== productTemplate.totalCells) {
+      throw new Error(
+        `Battery ${batterySerial} must use exactly ${productTemplate.totalCells} cells ` +
+        `(${productTemplate.numModules} modules × ${productTemplate.cellsPerModule} cells), ` +
+        `but ${matchedCells.length} were provided via ${requestedCellRefs.length} QR codes.`,
+      );
     }
 
-    const selectedCells = requestedCells.length > 0 ? matchedCells : [];
-    for (const cell of selectedCells) {
-      if (cell.id && usedCellIds.has(cell.id)) {
-        throw new Error(`Cell ${cell.internalSerial || cell.id} is assigned to more than one battery in the uploaded batch.`);
+    // Cross-battery duplicate check — same cell cannot be in two batteries in this batch
+    for (const cell of matchedCells) {
+      if (usedCellIds.has(cell.id)) {
+        throw new Error(
+          `Cell '${cell.internalSerial || cell.supplierBarcode || cell.id}' is assigned to more than one battery in this batch.`,
+        );
       }
-      if (cell.id) usedCellIds.add(cell.id);
+      usedCellIds.add(cell.id);
     }
 
+    // Resolve BMU
     let assignedBmu: AvailableBmuLike | undefined;
     if (row.bmuSerialNumber) {
       const explicitBmuRef = normalizeBatteryIdentifier(row.bmuSerialNumber);
       const match = bmuBySerial.get(explicitBmuRef);
       if (!match) {
-        throw new Error(`BMU serial ${row.bmuSerialNumber} was not found in the available BMU inventory.`);
+        throw new Error(
+          `BMU serial '${row.bmuSerialNumber}' was not found in available BMU inventory. ` +
+          `Ensure the BMU is imported before importing batteries.`,
+        );
       }
       if (usedBmuIds.has(match.id)) {
-        throw new Error(`BMU ${match.serialNumber} is already assigned to another battery in the uploaded batch.`);
+        throw new Error(`BMU '${match.serialNumber}' is assigned to more than one battery in this batch.`);
       }
       assignedBmu = match;
       usedBmuIds.add(match.id);
     }
 
-    const cellsForBattery = requestedCells.length > 0 ? selectedCells : [];
-    const moduleAssignments = Array.from({ length: productTemplate.numModules }, (_, moduleIndex) => {
-      const start = moduleIndex * productTemplate.cellsPerModule;
-      const end = start + productTemplate.cellsPerModule;
-      return {
-        moduleIndex,
-        cells: cellsForBattery.slice(start, end),
-      };
-    });
+    // Distribute cells across modules
+    const moduleAssignments = Array.from({ length: productTemplate.numModules }, (_, moduleIndex) => ({
+      moduleIndex,
+      cells: matchedCells.slice(
+        moduleIndex * productTemplate.cellsPerModule,
+        (moduleIndex + 1) * productTemplate.cellsPerModule,
+      ),
+    }));
 
     return {
       batterySerial,
       bmu: assignedBmu,
-      cells: cellsForBattery,
+      cells: matchedCells,
       modules: moduleAssignments,
     };
   });
@@ -154,16 +191,15 @@ export function validateBulkBatteryRows(rows: BulkBatteryRow[]): BulkBatteryVali
     }
 
     if (serials.includes(value)) {
-      duplicates.add(value);
-      errors.push(`Duplicate battery serial detected: ${value}`);
+      if (!duplicates.has(value)) {
+        // Emit exactly one error per unique duplicate serial
+        errors.push(`Row ${index + 2}: duplicate battery serial '${value}' — already used in this file`);
+        duplicates.add(value);
+      }
       continue;
     }
 
     serials.push(value);
-  }
-
-  if (duplicates.size > 0) {
-    errors.push(`Duplicate battery serial(s): ${Array.from(duplicates).join(', ')}`);
   }
 
   return {
@@ -202,6 +238,10 @@ export function normalizeBatteryProductTemplate(product: ProductTemplateLike): P
 
 export function resolveBatteryTemplate(products: ProductTemplateLike[], preferredName = '7.5'): ProductTemplateLike {
   const normalized = preferredName.toLowerCase();
+
+  if (products.length === 0) {
+    throw new Error('No product templates were provided for the bulk battery initialization.');
+  }
 
   const exactMatch = products.find(product => {
     const haystack = [product.name, product.productModel, product.batteryName, product.sku]
@@ -242,17 +282,22 @@ export function resolveBatteryTemplate(products: ProductTemplateLike[], preferre
   const approx = products.find(product => Number(product.capacityKwh ?? 0) >= 7 && Number(product.capacityKwh ?? 0) <= 8);
   if (approx) return normalizeBatteryProductTemplate(approx);
 
-  if (products.length === 0) {
-    throw new Error('No product templates were provided for the bulk battery initialization.');
-  }
+  // Last resort: any product that resolves to 2×12 structure
+  const byStructure = products.find(product => {
+    const n = normalizeBatteryProductTemplate(product);
+    return n.numModules === 2 && n.cellsPerModule === 12 && n.totalCells === 24;
+  });
+  if (byStructure) return normalizeBatteryProductTemplate(byStructure);
 
-  return normalizeBatteryProductTemplate(products[0]);
+  throw new Error(
+    `No matching product template found for the bulk battery import (expected 2 modules × 12 cells = 24 total). ` +
+    `Ensure a 7.5 kWh battery product template is configured in the Product Catalog.`,
+  );
 }
 
 export function selectAvailableBmUs(items: AvailableBmuLike[], count: number): AvailableBmuLike[] {
   const pool = items.filter(item => {
     const status = String(item.status ?? '').toUpperCase();
-    // Include all statuses EXCEPT those that are definitely unavailable
     const unavailableStatuses = ['QUARANTINED', 'FAILED', 'ARCHIVED'];
     return !unavailableStatuses.includes(status) && !item.reservedForBatteryId;
   });
@@ -267,7 +312,6 @@ export function selectAvailableBmUs(items: AvailableBmuLike[], count: number): A
 export function selectRequiredCells(items: AvailableCellLike[], requiredCount: number): AvailableCellLike[] {
   const pool = items.filter(item => {
     const status = String(item.status ?? '').toUpperCase();
-    // Include all statuses EXCEPT those that are definitely unavailable
     const unavailableStatuses = ['QUARANTINED', 'REJECTED', 'RESERVED', 'MODULE_ASSIGNED'];
     return !unavailableStatuses.includes(status) && !item.reservedForBatteryId && !item.reservedForOrderId && !item.assignedToModuleId;
   });
@@ -397,15 +441,35 @@ export function buildCompletedBatteryReleasePlan({
   };
 }
 
-export function dedupeModuleCellAssignments(cellIds: string[]): string[] {
+export function dedupeModuleCellAssignments<T extends string | { id?: string; cell_id?: string }>(cellIds: T[]): Array<T> {
   const seen = new Set<string>();
-  return cellIds.filter(cellId => {
-    const value = String(cellId ?? '').trim();
-    if (!value) return false;
-    if (seen.has(value)) return false;
+  const duplicatesRemoved: string[] = [];
+
+  const result = cellIds.filter(cellId => {
+    const value = typeof cellId === 'string'
+      ? String(cellId ?? '')
+      : String(cellId?.id ?? cellId?.cell_id ?? '');
+
+    if (!value) {
+      console.warn(`⚠️  Empty/undefined cell ID encountered during deduplication`);
+      return false;
+    }
+    if (seen.has(value)) {
+      duplicatesRemoved.push(value);
+      return false;
+    }
     seen.add(value);
     return true;
   });
+
+  if (duplicatesRemoved.length > 0) {
+    console.error(
+      `❌ Deduplication removed ${duplicatesRemoved.length} duplicate cell IDs: ` +
+      `[${duplicatesRemoved.slice(0, 5).join(', ')}${duplicatesRemoved.length > 5 ? '...' : ''}].`,
+    );
+  }
+
+  return result;
 }
 
 export async function createBulkBatteryInitialization({
@@ -433,15 +497,41 @@ export async function createBulkBatteryInitialization({
   const productTemplate = resolveBatteryTemplate(products, '7.5');
   const requiredBmuCount = rows.length;
   const totalRequiredCells = productTemplate.totalCells * rows.length;
-  const hasExplicitCellMaps = rows.some(row => Array.isArray(row.cellQrCodes) && row.cellQrCodes.length > 0);
-  const hasExplicitBmuMaps = rows.some(row => String(row.bmuSerialNumber ?? '').trim().length > 0);
-  const bmuPool = hasExplicitBmuMaps
+
+  // A row has explicit cell mapping if it provides QR codes OR cell IDs
+  const hasExplicitCellMaps = rows.some(
+    row =>
+      (Array.isArray(row.cellQrCodes) && row.cellQrCodes.length > 0) ||
+      (Array.isArray(row.cellIds) && row.cellIds.length > 0),
+  );
+
+  // If any row uses explicit cells, ALL rows must have them — no mixing allowed
+  if (hasExplicitCellMaps) {
+    const rowsMissingCells = rows.filter(
+      row =>
+        (!Array.isArray(row.cellQrCodes) || row.cellQrCodes.length === 0) &&
+        (!Array.isArray(row.cellIds) || row.cellIds.length === 0),
+    );
+    if (rowsMissingCells.length > 0) {
+      const serials = rowsMissingCells
+        .map(r => normalizeBatterySerial(r.batterySerialNumber ?? ''))
+        .slice(0, 5)
+        .join(', ');
+      throw new Error(
+        `${rowsMissingCells.length} battery row(s) are missing cell QR codes while other rows have explicit cells: ${serials}. ` +
+        `Either all batteries must have cell assignments or none.`,
+      );
+    }
+  }
+
+  const bmuPool = hasExplicitCellMaps
     ? availableBmUs.filter(item => {
         const status = String(item.status ?? '').toUpperCase();
         const unavailableStatuses = ['QUARANTINED', 'FAILED', 'ARCHIVED'];
         return !unavailableStatuses.includes(status) && !item.reservedForBatteryId;
       })
     : selectAvailableBmUs(availableBmUs, requiredBmuCount);
+
   const selectedCells = hasExplicitCellMaps
     ? availableCells.filter(item => {
         const status = String(item.status ?? '').toUpperCase();
@@ -452,6 +542,7 @@ export async function createBulkBatteryInitialization({
           && !item.assignedToModuleId;
       })
     : selectRequiredCells(availableCells, totalRequiredCells);
+
   const batteryPlan = hasExplicitCellMaps
     ? resolveExplicitBatteryAssignments(rows, bmuPool, selectedCells, productTemplate).map((battery, index) => ({
         rowIndex: index + 2,

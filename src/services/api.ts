@@ -71,6 +71,65 @@ function mergeReservedBatteryCells(modules: any[], reservedCells: any[], battery
   return Array.isArray(modules) ? modules : [];
 }
 
+function hydrateModuleCells(assignments: any[] = []): any[] {
+  const uniqueByCellId = new Map<string, any>();
+
+  (assignments || []).forEach((assignment: any) => {
+    if (!assignment) return;
+    const cell = assignment.cell || assignment;
+    const cellId = cell?.id || assignment.cell_id || assignment.cellId;
+    if (!cellId) return;
+
+    const slotIndex = Number.isFinite(Number(assignment.cell_slot_index ?? assignment.cellSlotIndex))
+      ? Number(assignment.cell_slot_index ?? assignment.cellSlotIndex)
+      : Number.isFinite(Number(cell.moduleSlotIndex))
+        ? Number(cell.moduleSlotIndex)
+        : undefined;
+
+    const normalizedCell = { ...cell, ...(slotIndex !== undefined ? { moduleSlotIndex: slotIndex } : {}) };
+    const current = uniqueByCellId.get(cellId);
+    if (!current || (slotIndex !== undefined && (current.moduleSlotIndex === undefined || slotIndex < current.moduleSlotIndex))) {
+      uniqueByCellId.set(cellId, normalizedCell);
+    }
+  });
+
+  return Array.from(uniqueByCellId.values()).sort((a, b) => {
+    const aSlot = Number.isFinite(Number(a.moduleSlotIndex)) ? Number(a.moduleSlotIndex) : Number.MAX_SAFE_INTEGER;
+    const bSlot = Number.isFinite(Number(b.moduleSlotIndex)) ? Number(b.moduleSlotIndex) : Number.MAX_SAFE_INTEGER;
+    return aSlot - bSlot;
+  });
+}
+
+async function loadModuleCellAssignments(moduleIds: string[]): Promise<any[]> {
+  const batchSize = 10;
+  const batches = Array.from({ length: Math.ceil(moduleIds.length / batchSize) }, (_, index) =>
+    moduleIds.slice(index * batchSize, (index + 1) * batchSize),
+  );
+  const results = await Promise.all(batches.map(ids => supabase
+    .from('module_cells')
+    .select('module_id, cell_id, cell_slot_index, cell:cells(*)')
+    .in('module_id', ids)
+    .order('cell_slot_index', { ascending: true })));
+  const failed = results.find(result => result.error);
+  if (failed?.error) throw failed.error;
+  const assignments = results.flatMap(result => result.data || []);
+  if (assignments.length > 0 || moduleIds.length === 0) return assignments;
+
+  // Recover from an empty bulk response during token refresh or transient API issues.
+  const fallbackAssignments: any[] = [];
+  for (let start = 0; start < moduleIds.length; start += batchSize) {
+    const fallbackResults = await Promise.all(moduleIds.slice(start, start + batchSize).map(moduleId => supabase
+      .from('module_cells')
+      .select('module_id, cell_id, cell_slot_index, cell:cells(*)')
+      .eq('module_id', moduleId)
+      .order('cell_slot_index', { ascending: true })));
+    const fallbackError = fallbackResults.find(result => result.error);
+    if (fallbackError?.error) throw fallbackError.error;
+    fallbackAssignments.push(...fallbackResults.flatMap(result => result.data || []));
+  }
+  return fallbackAssignments;
+}
+
 function mapQueryValue(method: string, value: any, index: number) {
   if (typeof value !== 'string') return value;
   if (method === 'eq' || method === 'neq' || method === 'in' || method === 'ilike') {
@@ -651,6 +710,8 @@ async getUsers(): Promise<User[]> {
         id: cell.id,
         internalSerial: cell.internalSerial ?? (cell as any).internal_serial,
         supplierBarcode: cell.supplierBarcode ?? (cell as any).supplier_barcode,
+        // BUG-11 fix: map qrCode so QR-code-based cell lookup works in resolveExplicitBatteryAssignments
+        qrCode: (cell as any).qrCode ?? (cell as any).qr_code ?? cell.supplierBarcode ?? (cell as any).supplier_barcode,
         status: cell.status,
         reservedForBatteryId: cell.reservedForBatteryId ?? (cell as any).reserved_for_battery_id ?? null,
         reservedForOrderId: cell.reservedForOrderId ?? (cell as any).reserved_for_order_id ?? null,
@@ -668,8 +729,9 @@ async getUsers(): Promise<User[]> {
       throw new Error('Invalid batch plan: no batteries to create.');
     }
 
-    const productionOrderId = `PO-BULK-${Date.now()}`;
-    const timestampSuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
+    // BUG-19 fix: add random suffix to prevent collision under concurrent imports
+    const productionOrderId = `PO-BULK-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+    const timestampSuffix = Math.random().toString(36).substring(2, 8).toUpperCase();
     const now = new Date();
     const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, '0')}`;
 
@@ -698,11 +760,14 @@ async getUsers(): Promise<User[]> {
       }
 
       const batteryInserts = params.batchPlan.batteries.map((plan: any, idx: number) => {
-        const uniqueSerial = `P2G-7K5-${yymm}-${timestampSuffix}-${String(idx + 1).padStart(5, '0')}`;
         const uniqueId = `bat-${timestampSuffix}-${String(idx + 1).padStart(6, '0')}`;
+        // BUG-05 fix: use the serial from the batch plan (came from the Excel file), not a newly generated one
+        const serial = plan.batterySerial
+          ? String(plan.batterySerial).toUpperCase()
+          : `P2G-7K5-${yymm}-${timestampSuffix}-${String(idx + 1).padStart(5, '0')}`;
         return {
           id: uniqueId,
-          serial_number: uniqueSerial,
+          serial_number: serial,
           production_order_id: productionOrderId,
           product_id: productTemplate?.id,
           bmu_id: plan.bmu?.id || null,
@@ -741,11 +806,45 @@ async getUsers(): Promise<User[]> {
         const battery = batteriesData?.[batteryIndex];
         if (!battery) return;
 
+        console.log(
+          `Battery ${batteryIndex + 1} (${battery.serial_number}): Total cells in plan = ${plan.cells.length}, ` +
+          `Expected = ${productTemplate?.totalCells || 0}, Modules = ${productTemplate?.numModules || 0}, ` +
+          `CellsPerModule = ${cellsPerModule}`
+        );
+
         for (let moduleIndex = 0; moduleIndex < (productTemplate?.numModules || 0); moduleIndex += 1) {
           const start = moduleIndex * cellsPerModule;
           const end = start + cellsPerModule;
-          const moduleCellIds = plan.cells.slice(start, end).map((cell: any) => cell.id);
+          const cellsSlice = plan.cells.slice(start, end);
+          const moduleCellIds = cellsSlice.map((cell: any) => cell.id);
+
+          // Check for problematic cells in the slice
+          const nullCellIndices: number[] = [];
+          const cellDetails: string[] = [];
+          for (let i = 0; i < cellsSlice.length; i++) {
+            const cell = cellsSlice[i];
+            if (!cell || !cell.id) {
+              nullCellIndices.push(i);
+              cellDetails.push(`[${i}]: NULL/UNDEFINED`);
+            } else {
+              cellDetails.push(`[${i}]: id=${cell.id} qr=${cell.supplierBarcode || cell.internalSerial || 'unknown'}`);
+            }
+          }
+
+          if (nullCellIndices.length > 0) {
+            console.error(
+              `⚠️  Battery ${battery.serial_number}, Module ${moduleIndex}: ` +
+              `Found ${nullCellIndices.length} null/undefined cells at indices ${nullCellIndices.join(', ')}. ` +
+              `Cells: ${cellDetails.join(' | ')}`
+            );
+          }
+
+          // BUG-01 fix: declare moduleId BEFORE the console.log that uses it (was TDZ crash)
           const moduleId = `mod-${battery.id}-${moduleIndex}`;
+          console.log(
+            `Module ${moduleIndex} (${moduleId}): Slice[${start}:${end}] from ${plan.cells.length} = ${cellsSlice.length} cells. ` +
+            `IDs before dedup: [${moduleCellIds.join(', ')}]`
+          );
           const moduleSerial = `P2G-MOD-${String(now.getDate()).padStart(2, '0')}${String(now.getMonth() + 1).padStart(2, '0')}-${timestampSuffix}-${String(moduleSequence).padStart(5, '0')}`;
           moduleSequence += 1;
 
@@ -785,7 +884,20 @@ async getUsers(): Promise<User[]> {
             updated_at: now.toISOString(),
           });
 
-          const uniqueModuleCellIds = dedupeModuleCellAssignments(moduleCellIds);
+          const uniqueModuleCellIds = dedupeModuleCellAssignments<string>(moduleCellIds);
+          if (uniqueModuleCellIds.length !== cellsPerModule) {
+            console.error(
+              `❌ CRITICAL: Module ${moduleId} (Battery ${battery.serial_number}, Module ${moduleIndex}) ` +
+              `Expected ${cellsPerModule} cells but got ${uniqueModuleCellIds.length}. ` +
+              `Slice [${start}:${end}] from ${plan.cells.length} total. ` +
+              `Input IDs: [${moduleCellIds.join(', ')}]. ` +
+              `After dedup: [${uniqueModuleCellIds.join(', ')}]`
+            );
+          } else {
+            console.log(
+              `✓ Module ${moduleId} (Battery ${battery.serial_number}, Module ${moduleIndex}): ${cellsPerModule} cells OK`
+            );
+          }
           uniqueModuleCellIds.forEach((cellId: string, slotIndex: number) => {
             moduleCellInserts.push({
               module_id: moduleId,
@@ -829,11 +941,19 @@ async getUsers(): Promise<User[]> {
       }
 
       if (moduleCellInserts.length > 0) {
-        const { error: moduleCellError } = await supabase.from('module_cells').insert(moduleCellInserts);
+        console.log(
+          `📦 Inserting ${moduleCellInserts.length} module-cell assignments across ${moduleInserts.length} modules. ` +
+          `Expected: ${moduleInserts.length} modules × ${cellsPerModule} cells = ${moduleInserts.length * cellsPerModule}`
+        );
+        const { error: moduleCellError, data: moduleCellData } = await supabase.from('module_cells').insert(moduleCellInserts);
         if (moduleCellError) {
-          console.error('Module cell assignment failed:', moduleCellError);
+          console.error('❌ Module cell assignment failed:', moduleCellError);
+          console.error('First 5 inserts attempted:', moduleCellInserts.slice(0, 5));
           throw new Error(`Failed to assign cells to modules: ${moduleCellError.message}`);
         }
+        console.log(
+          `✅ Successfully inserted ${moduleCellData?.length || moduleCellInserts.length} module-cell assignments`
+        );
       }
 
       if (moduleTestsInserts.length > 0) {
@@ -844,9 +964,14 @@ async getUsers(): Promise<User[]> {
         }
       }
 
-      const cellIds = params.batchPlan.batteries.flatMap((plan: any) => plan.cells.map((c: any) => c.id));
+      const cellIds = Array.from(new Set(
+        params.batchPlan.batteries.flatMap((plan: any) => plan.cells.map((c: any) => c.id)),
+      ));
 
-      if (cellIds.length > 0) {
+      // Keep each request small enough for PostgREST URLs when importing large batches.
+      const reservationBatchSize = 200;
+      for (let start = 0; start < cellIds.length; start += reservationBatchSize) {
+        const reservationIds = cellIds.slice(start, start + reservationBatchSize);
         const { error: cellError } = await supabase
           .from('cells')
           .update({
@@ -854,10 +979,14 @@ async getUsers(): Promise<User[]> {
             status: 'RESERVED',
             updated_at: now.toISOString(),
           })
-          .in('id', cellIds);
+          .in('id', reservationIds);
 
+        // BUG-03 fix: throw on cell reservation failure — silently continuing causes double-allocation
         if (cellError) {
-          console.error('Cell reservation failed:', cellError);
+          throw new Error(
+            `Failed to reserve cells for production order ${productionOrderId} ` +
+            `(batch ${Math.floor(start / reservationBatchSize) + 1}): ${cellError.message}`,
+          );
         }
       }
 
@@ -876,8 +1005,9 @@ async getUsers(): Promise<User[]> {
               })
               .eq('id', plan.bmu.id);
 
+            // BUG-04 fix: throw on BMU update failure — silently continuing causes double-assignment
             if (bmuError) {
-              console.error(`BMU ${plan.bmu.id} reservation failed:`, bmuError);
+              throw new Error(`Failed to assign BMU '${plan.bmu.id}' to battery '${battery.id}': ${bmuError.message}`);
             }
           }
 
@@ -1119,21 +1249,41 @@ async getUsers(): Promise<User[]> {
     const { data, error } = await supabase.from('modules').select('*').order('created_at', { ascending: false });
     if (error) throw error;
     const modules = (data || []) as any[];
+    console.log(`getModules: Loaded ${modules.length} modules`);
     const moduleIds = modules.map(module => module.id).filter(Boolean);
     if (moduleIds.length === 0) return modules;
-    const { data: assignments, error: assignmentsError } = await supabase
-      .from('module_cells')
-      .select('moduleId, cellId, cellSlotIndex, cell:cells(*)')
-      .in('moduleId', moduleIds)
-      .order('cellSlotIndex', { ascending: true });
-    if (assignmentsError) throw assignmentsError;
+
+    // Explicitly select with snake_case and map to camelCase
+    const assignments = await loadModuleCellAssignments(moduleIds);
+
+    console.log(`getModules: Loaded ${assignments?.length || 0} total cell assignments for ${moduleIds.length} modules`);
+
     const cellsByModule = new Map<string, any[]>();
     (assignments || []).forEach((assignment: any) => {
-      if (!assignment.cell) return;
-      const cells = cellsByModule.get(assignment.moduleId) || [];
-      cells.push({ ...assignment.cell, moduleSlotIndex: assignment.cellSlotIndex });
-      cellsByModule.set(assignment.moduleId, cells);
+      if (!assignment) return;
+
+      const moduleId = assignment.module_id || assignment.moduleId;
+      if (!moduleId) {
+        console.warn(`Assignment has no moduleId: ${JSON.stringify(assignment)}`);
+        return;
+      }
+
+      const existing = cellsByModule.get(moduleId) || [];
+      const deduped = hydrateModuleCells([...existing, assignment]);
+      cellsByModule.set(moduleId, deduped);
     });
+
+    const cellCounts = Array.from(cellsByModule.values()).map(cells => cells.length);
+    const distribution = new Map<number, number>();
+    cellCounts.forEach(count => {
+      distribution.set(count, (distribution.get(count) || 0) + 1);
+    });
+    console.log(
+      `getModules: Cell distribution per module: ${Array.from(distribution.entries())
+        .map(([count, freq]) => `${freq} modules with ${count} cells`)
+        .join(', ')}`
+    );
+
     return modules.map(module => ({
       ...module,
       qrCode: module.qrCode || `${module.serialNumber}|MODULE:${module.id}`,
@@ -1183,16 +1333,18 @@ async getUsers(): Promise<User[]> {
       .order('moduleIndex', { ascending: true });
     if (modulesError) throw modulesError;
     const moduleIds = (modules || []).map((module: any) => module.id).filter(Boolean);
-    const { data: assignments, error: assignmentsError } = moduleIds.length
-      ? await supabase.from('module_cells').select('moduleId, cellId, cellSlotIndex, cell:cells(*)').in('moduleId', moduleIds).order('cellSlotIndex', { ascending: true })
-      : { data: [], error: null };
-    if (assignmentsError) throw assignmentsError;
+    const assignments = moduleIds.length ? await loadModuleCellAssignments(moduleIds) : [];
+
     const cellsByModule = new Map<string, any[]>();
     (assignments || []).forEach((assignment: any) => {
-      if (!assignment.cell) return;
-      const cells = cellsByModule.get(assignment.moduleId) || [];
-      cells.push({ ...assignment.cell, moduleSlotIndex: assignment.cellSlotIndex });
-      cellsByModule.set(assignment.moduleId, cells);
+      if (!assignment) return;
+
+      const moduleId = assignment.module_id || assignment.moduleId;
+      if (!moduleId) return;
+
+      const existing = cellsByModule.get(moduleId) || [];
+      const deduped = hydrateModuleCells([...existing, assignment]);
+      cellsByModule.set(moduleId, deduped);
     });
     const modulesByBattery = new Map<string, any[]>();
     (modules || []).forEach((module: any) => {
@@ -1519,13 +1671,14 @@ async getUsers(): Promise<User[]> {
       if (assignmentError) throw assignmentError;
       const assignmentsByModule = new Map<string, any[]>();
       (assignments || []).forEach((assignment: any) => {
-        const cells = assignmentsByModule.get(assignment.moduleId) || [];
-        if (assignment.cell) cells.push({ ...assignment.cell, moduleSlotIndex: assignment.cellSlotIndex });
-        assignmentsByModule.set(assignment.moduleId, cells);
+        const moduleId = assignment.moduleId || assignment.module_id;
+        if (!moduleId) return;
+        const cells = assignmentsByModule.get(moduleId) || [];
+        assignmentsByModule.set(moduleId, hydrateModuleCells([...cells, assignment]));
       });
       battery.modules = battery.modules.map((module: any) => ({
         ...module,
-        cells: assignmentsByModule.get(module.id) || module.cells || [],
+        cells: assignmentsByModule.get(module.id) || hydrateModuleCells(module.cells || []),
       }));
     }
 
@@ -2217,18 +2370,20 @@ async getUsers(): Promise<User[]> {
     if (modulesError) throw modulesError;
     const moduleIds = (batteryModules || []).map((module: any) => module.id).filter(Boolean);
     const { data: moduleCells, error: moduleCellsError } = moduleIds.length
-      ? await supabase.from('module_cells').select('moduleId, cellId, cellSlotIndex').in('moduleId', moduleIds)
+      ? await supabase.from('module_cells').select('module_id, cell_id, cell_slot_index').in('module_id', moduleIds)
       : { data: [], error: null };
     if (moduleCellsError) throw moduleCellsError;
     const cellsByModule = new Map<string, any[]>();
     (moduleCells || []).forEach((assignment: any) => {
-      const cells = cellsByModule.get(assignment.moduleId) || [];
-      cells.push(assignment);
-      cellsByModule.set(assignment.moduleId, cells);
+      const moduleId = assignment.module_id || assignment.moduleId;
+      if (!moduleId) return;
+
+      const cells = cellsByModule.get(moduleId) || [];
+      cellsByModule.set(moduleId, hydrateModuleCells([...cells, assignment]));
     });
     current.modules = (batteryModules || []).map((module: any) => ({
       ...module,
-      cells: cellsByModule.get(module.id) || [],
+      cells: cellsByModule.get(module.id) || hydrateModuleCells(module.cells || []),
     }));
     const passed = payload.status === 'PASSED';
     if (passed && current.status === 'FINISHED') throw new Error('Battery has already been released.');
@@ -2315,11 +2470,11 @@ async getUsers(): Promise<User[]> {
     const loadModuleCells = async (moduleId: string) => {
       const { data, error } = await supabase
         .from('module_cells')
-        .select('moduleId, cellId, cellSlotIndex, cell:cells(*)')
-        .eq('moduleId', moduleId)
-        .order('cellSlotIndex', { ascending: true });
+        .select('module_id, cell_id, cell_slot_index, cell:cells(*)')
+        .eq('module_id', moduleId)
+        .order('cell_slot_index', { ascending: true });
       if (error) throw error;
-      return (data || []).map((assignment: any) => assignment.cell || assignment);
+      return hydrateModuleCells(data || []);
     };
 
     const loadBatteryModules = async (batteryId: string) => {
@@ -2369,7 +2524,13 @@ async getUsers(): Promise<User[]> {
         const batteryId = entityType === 'CELL' ? context.module?.batteryId : entity.batteryId;
         if (batteryId) {
           const battery = await supabase.from('batteries').select('*').eq('id', batteryId).maybeSingle();
-          if (battery?.data) await loadBatteryContext(battery.data, context);
+          if (battery?.data) {
+            await loadBatteryContext(battery.data, context);
+            if (entityType === 'MODULE') {
+              context.cells = await loadModuleCells(entity.id);
+              context.entity = { ...entity, cells: context.cells };
+            }
+          }
         }
       }
       if (entityType === 'BATTERY') {

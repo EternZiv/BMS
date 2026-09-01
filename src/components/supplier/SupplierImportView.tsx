@@ -223,6 +223,12 @@ export const SupplierImportView: React.FC = () => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    // BUG-16 fix: show loading state so UI is not clickable during parse
+    setLoading(true);
+    setBatteryPreviewMode(false);
+    setBatteryImportResult(null);
+    setBatteryParsedRows([]);
+
     const reader = new FileReader();
     reader.onload = async () => {
       try {
@@ -231,111 +237,189 @@ export const SupplierImportView: React.FC = () => {
 
         const workbook = XLSX.read(data, { type: 'binary', cellDates: true });
         const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        // raw:false converts numbers to strings, defval:'' fills empty cells from merged regions
         const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false }) as Record<string, any>[];
 
-        const findValue = (row: Record<string, any>, ...keys: string[]) => {
-          const normalizedLookup = Object.fromEntries(
-            Object.entries(row).map(([key, value]) => {
-              const normalized = String(key).toLowerCase().trim().replace(/\s+/g, ' ');
-              return [normalized, value];
-            })
-          );
+        if (rawRows.length === 0) {
+          throw new Error('The spreadsheet is empty or has no data rows.');
+        }
 
+        /**
+         * Flexible column-value finder.
+         * Excel merged cells only store their value in the TOP-LEFT cell of the merge;
+         * all other cells in the merge are empty. We therefore track state across rows.
+         *
+         * Column aliases supported (case-insensitive, partial match):
+         *   QR code : 'qr code', 'qr', 'qrcode', 'barcode', 'cell qr', 'cell_qr'
+         *   Battery  : 'battery', 'battery serial', 'battery_serial', 'battery_no', 'battery number'
+         *   BMU      : 'bmu', 'bmu serial', 'bmu_serial', 'controller'
+         *   Modul    : 'modul', 'module', 'module no', 'module_no'
+         */
+        const findColValue = (row: Record<string, any>, ...keys: string[]): string => {
+          // Exact header match first
           for (const key of keys) {
-            const normalized = String(key).toLowerCase().trim().replace(/\s+/g, ' ');
-            const val = normalizedLookup[normalized];
-            if (val !== undefined && val !== null && String(val).trim() !== '') {
-              return String(val).trim();
-            }
-          }
-          
-          for (const key of keys) {
-            const keyword = String(key).toLowerCase().trim();
-            for (const [headerKey, headerVal] of Object.entries(normalizedLookup)) {
-              if (headerKey.includes(keyword) && headerVal !== undefined && headerVal !== null && String(headerVal).trim() !== '') {
-                return String(headerVal).trim();
+            const k = key.toLowerCase().trim();
+            for (const [col, val] of Object.entries(row)) {
+              if (col.toLowerCase().trim() === k) {
+                const v = String(val ?? '').trim();
+                if (v) return v;
               }
             }
           }
-          
+          // Partial match (header contains the keyword)
+          for (const key of keys) {
+            const k = key.toLowerCase().trim();
+            for (const [col, val] of Object.entries(row)) {
+              if (col.toLowerCase().trim().includes(k)) {
+                const v = String(val ?? '').trim();
+                if (v) return v;
+              }
+            }
+          }
           return '';
         };
 
-        // Parse grouped structure: cells (QR), modules, batteries, BMUs
-        const batteryGroups: Map<string, { bmuSerial: string; qrCodes: string[]; firstRowIndex: number }> = new Map();
-        let currentBatteryMarker = '';
-        let currentBmu = '';
-        let currentCells: string[] = [];
-        let firstRowIndexForBattery = 2;
+        /**
+         * Parse battery groups from the Excel.
+         *
+         * Format (from the uploaded screenshot):
+         *   Col A (S)       : Slot number 1-12 per module
+         *   Col B (QR code) : Cell QR / barcode (one per row)
+         *   Col C (Modul)   : Module number 1 or 2 (merged — appears once per 12 rows)
+         *   Col D (Battery) : Battery sequence number (merged — appears once per 24 rows)
+         *   Col E (BMU)     : BMU serial (merged — appears once per 24 rows)
+         *
+         * Because xlsx stores merged-cell values only in the FIRST row of the merge,
+         * we detect a new battery when Battery column has a non-empty value.
+         */
+        const batteryGroups: Map<string, {
+          rawSerial: string;
+          bmuSerial: string;
+          qrCodes: string[];
+          seqNumber: number;
+        }> = new Map();
 
-        for (let i = 0; i < rawRows.length; i++) {
-          const row = rawRows[i];
-          const qrCode = findValue(row, 'qr', 'qr code', 'qrcode', 'cell qr');
-          const batteryMarker = findValue(row, 'battery', 'battery serial', 'battery_no', 'battery_number');
-          const bmuSerial = findValue(row, 'bmu', 'bmu serial', 'bmu_no', 'controller');
+        let currentKey = '';
+        let batteryCounter = 0;
+        const now = new Date();
+        const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, '0')}`;
 
-          // When we see a new battery marker
-          if (batteryMarker && batteryMarker !== currentBatteryMarker) {
-            // Save the PREVIOUS battery group (if exists)
-            if (currentBatteryMarker && currentCells.length > 0) {
-              batteryGroups.set(`battery_${currentBatteryMarker}`, {
-                bmuSerial: currentBmu,
-                qrCodes: currentCells,
-                firstRowIndex: firstRowIndexForBattery,
-              });
-            }
-            // Start new battery
-            currentBatteryMarker = batteryMarker;
-            currentBmu = bmuSerial;
-            firstRowIndexForBattery = i + 2;
-            currentCells = qrCode ? [qrCode] : [];
-          } else if (qrCode) {
-            // Keep accumulating cells for current battery
-            currentCells.push(qrCode);
+        for (const row of rawRows) {
+          const qrCode   = findColValue(row, 'QR code', 'qr', 'qrcode', 'barcode', 'cell qr', 'cell_qr');
+          const batteryVal = findColValue(row, 'Battery', 'battery serial', 'battery_serial', 'battery_no', 'battery number', 'battery');
+          const bmuVal   = findColValue(row, 'BMU', 'bmu serial', 'bmu_serial', 'controller');
+
+          // A non-empty Battery column value signals the start of a new battery group
+          if (batteryVal) {
+            batteryCounter++;
+            currentKey = `bat_${batteryCounter}`;
+
+            // If the Excel value is a plain number (e.g. "1", "2"), format it as a proper serial
+            const isNumeric = /^\d+$/.test(batteryVal);
+            const rawSerial = isNumeric
+              ? `P2G-7K5-${yymm}-${String(parseInt(batteryVal)).padStart(6, '0')}`
+              : batteryVal.toUpperCase();
+
+            batteryGroups.set(currentKey, {
+              rawSerial,
+              bmuSerial: bmuVal,   // BMU is on the same first row of the merged region
+              qrCodes: [],
+              seqNumber: batteryCounter,
+            });
+          }
+
+          // BUG-15 fix: capture BMU from ANY row in the group (not just the battery-header row)
+          if (bmuVal && currentKey) {
+            const g = batteryGroups.get(currentKey);
+            if (g && !g.bmuSerial) g.bmuSerial = bmuVal;
+          }
+
+          // Accumulate cell QR codes into the current battery group
+          if (qrCode && currentKey) {
+            batteryGroups.get(currentKey)?.qrCodes.push(qrCode.trim());
           }
         }
 
-        // Save the LAST battery group
-        if (currentBatteryMarker && currentCells.length > 0) {
-          batteryGroups.set(`battery_${currentBatteryMarker}`, {
-            bmuSerial: currentBmu,
-            qrCodes: currentCells,
-            firstRowIndex: firstRowIndexForBattery,
-          });
-        }
-
         if (batteryGroups.size === 0) {
-          throw new Error('No battery groups were found in the spreadsheet.');
+          throw new Error(
+            'No battery groups were found in the spreadsheet. ' +
+            'Make sure the file has a "Battery" column with a number or serial for each battery, ' +
+            'and a "QR code" column with one cell barcode per row (24 rows per battery: 2 modules × 12 cells).'
+          );
         }
 
-        // Generate battery serials for each group
-        const now = new Date();
-        const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, '0')}`;
-        
-        const normalizedRows = Array.from(batteryGroups.entries()).map((entry, index) => {
-          const group = entry[1];
-          const bmuSerial = group.bmuSerial;
-          const batterySerialNumber = `P2G-7K5-${yymm}-${String(index + 1).padStart(6, '0')}`;
+        // Build per-battery validation
+        const globalQrSeen = new Map<string, number>();
+        const normalizedRows = Array.from(batteryGroups.values()).map((group, idx) => {
+          const errors: string[] = [];
+
+          // Must have exactly 24 cells (2 modules × 12)
+          if (group.qrCodes.length !== 24) {
+            errors.push(
+              `Expected 24 cells (2 modules × 12), found ${group.qrCodes.length}`
+            );
+          }
+
+          // Check for duplicates within this battery
+          const localSeen = new Set<string>();
+          const localDups: string[] = [];
+          for (const qr of group.qrCodes) {
+            const norm = qr.toLowerCase();
+            if (norm && localSeen.has(norm)) localDups.push(qr);
+            if (norm) localSeen.add(norm);
+            // Track globally for cross-battery warnings
+            if (norm) globalQrSeen.set(norm, (globalQrSeen.get(norm) || 0) + 1);
+          }
+          if (localDups.length > 0) {
+            errors.push(
+              `${localDups.length} duplicate QR code(s) within battery: ${localDups.slice(0, 3).join(', ')}`
+            );
+          }
 
           return {
-            index: group.firstRowIndex,
-            batterySerialNumber,
-            bmuSerialNumber: bmuSerial,
-            qrCodeValue: group.qrCodes.length > 0 ? group.qrCodes[0] : '',
+            index: idx + 2,
+            batterySerialNumber: group.rawSerial,
+            bmuSerialNumber: group.bmuSerial || '',
             cellQrCodes: group.qrCodes,
             cellCount: group.qrCodes.length,
-            isValid: true,
-            errors: [] as string[],
+            isValid: errors.length === 0,
+            errors,
           };
         });
+
+        // Cross-battery duplicate summary
+        let crossBatteryDups = 0;
+        for (const count of globalQrSeen.values()) {
+          if (count > 1) crossBatteryDups++;
+        }
 
         setBatteryParsedRows(normalizedRows);
         setBatteryImportFileName(file.name);
         setBatteryPreviewMode(true);
-        addNotification('success', 'Battery Excel Parsed', `Loaded ${normalizedRows.length} batteries with generated serials (${normalizedRows.reduce((sum, r) => sum + r.cellCount, 0)} total cells).`);
+
+        const invalidCount = normalizedRows.filter(r => !r.isValid).length;
+        const validCount = normalizedRows.filter(r => r.isValid).length;
+        const totalCells = normalizedRows.reduce((s, r) => s + r.cellCount, 0);
+
+        if (invalidCount > 0 || crossBatteryDups > 0) {
+          addNotification(
+            'warning',
+            'Battery Excel Parsed with Issues',
+            `Loaded ${normalizedRows.length} batteries (${validCount} valid, ${invalidCount} with errors). ` +
+            `${totalCells} total cells. ` +
+            (crossBatteryDups > 0 ? `${crossBatteryDups} QR code(s) appear in multiple batteries.` : '')
+          );
+        } else {
+          addNotification(
+            'success',
+            'Battery Excel Parsed Successfully',
+            `Loaded ${normalizedRows.length} batteries · ${totalCells} cells · Ready to validate.`
+          );
+        }
       } catch (err: any) {
         addNotification('error', 'Battery File Parse Failed', err.message);
       } finally {
+        setLoading(false);
         if (e.target) e.target.value = '';
       }
     };
@@ -343,16 +427,34 @@ export const SupplierImportView: React.FC = () => {
   };
 
   const confirmBatteryImport = async () => {
-    const payloadRows = batteryParsedRows.filter(row => row.isValid).map(row => ({
-      batterySerialNumber: row.batterySerialNumber,
-      bmuSerialNumber: row.bmuSerialNumber,
-      cellQrCodes: Array.isArray(row.cellQrCodes) ? row.cellQrCodes : (row.qrCodeValue ? [row.qrCodeValue] : []),
-    }));
+    // BUG-17 fix: don't block the entire import on a few invalid rows.
+    // Import valid rows only and warn the user about skipped ones.
+    const validRows = batteryParsedRows.filter(row => row.isValid);
+    const invalidRows = batteryParsedRows.filter(row => !row.isValid);
 
-    if (payloadRows.length === 0) {
-      addNotification('error', 'No valid battery rows', 'Upload a valid battery file with at least one battery serial number.');
+    if (validRows.length === 0) {
+      addNotification(
+        'error',
+        'No Valid Batteries',
+        'All batteries in the file have errors. Fix your spreadsheet and re-upload.'
+      );
       return;
     }
+
+    if (invalidRows.length > 0) {
+      addNotification(
+        'warning',
+        `Skipping ${invalidRows.length} Invalid ${invalidRows.length === 1 ? 'Battery' : 'Batteries'}`,
+        `Processing ${validRows.length} valid ${validRows.length === 1 ? 'battery' : 'batteries'}. ` +
+        `${invalidRows.length} with errors will be skipped.`
+      );
+    }
+
+    const payloadRows = validRows.map(row => ({
+      batterySerialNumber: row.batterySerialNumber,
+      bmuSerialNumber: row.bmuSerialNumber || undefined,
+      cellQrCodes: Array.isArray(row.cellQrCodes) ? row.cellQrCodes : [],
+    }));
 
     setLoading(true);
     try {
@@ -365,12 +467,13 @@ export const SupplierImportView: React.FC = () => {
       addNotification(
         'success',
         'Battery Batch Validated',
-        `Validated ${result.batchSize} batteries for ${result.template.name}. Required ${result.order.requiredCells} cells and ${result.order.requiredBmUs} BMUs.`
+        `Validated ${result.batchSize} batteries for ${result.template.name}. ` +
+        `Required ${result.order.requiredCells} cells and ${result.order.requiredBmUs} BMUs.`
       );
       setBatteryPreviewMode(false);
       triggerRefresh();
     } catch (err: any) {
-      addNotification('error', 'Battery Batch Import Failed', err.message);
+      addNotification('error', 'Battery Batch Validation Failed', err.message);
     } finally {
       setLoading(false);
     }

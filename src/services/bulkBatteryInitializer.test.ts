@@ -134,3 +134,21 @@ test('module cell assignment deduplicates reused cell ids before insert', () => 
 
   assert.deepEqual(unique, ['cell-1', 'cell-2', 'cell-3']);
 });
+
+test('module cell hydration deduplicates repeated assignment rows while preserving slot order', () => {
+  const duplicateAssignments = [
+    { cell_id: 'cell-1', cell_slot_index: 0 },
+    { cell_id: 'cell-2', cell_slot_index: 1 },
+    { cell_id: 'cell-2', cell_slot_index: 1 },
+    { cell_id: 'cell-3', cell_slot_index: 2 },
+    { id: 'cell-3', cell_slot_index: 2 },
+  ];
+
+  const unique = dedupeModuleCellAssignments(duplicateAssignments);
+
+  assert.equal(unique.length, 3);
+  assert.deepEqual(
+    unique.map((cell: any) => cell.id ?? cell.cell_id),
+    ['cell-1', 'cell-2', 'cell-3']
+  );
+});
