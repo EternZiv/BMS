@@ -77,7 +77,10 @@ export const InventoryView: React.FC = () => {
 
   useEffect(() => {
     setCellDisplayLimit(50);
-    loadInventory();
+    const timer = window.setTimeout(() => {
+      void loadInventory();
+    }, 350);
+    return () => window.clearTimeout(timer);
   }, [activeTab, search, statusFilter, cellsView, refreshKey]);
 
   const loadInventory = async () => {

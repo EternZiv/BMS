@@ -443,8 +443,26 @@ async getUsers(): Promise<User[]> {
 
   // Reports & Quality Analytics
   async getReportsAnalytics(): Promise<any> {
-    const [cells, batteriesResult, modulesResult, bmsResult, cellTestsResult, batteryTestsResult, quarantineResult] = await Promise.all([
-      this.getCells({ limit: 10000, fields: 'id,internal_serial,supplier_barcode,supplier_ocv_v,production_ocv_v,status,reserved_for_order_id,reserved_for_battery_id,tested_at' }),
+    const reportCellFields = 'id,internal_serial,supplier_barcode,supplier_ocv_v,production_ocv_v,status,reserved_for_order_id,reserved_for_battery_id,tested_at';
+    const { count: cellCount, error: cellCountError } = await supabase
+      .from('cells')
+      .select('id', { count: 'exact', head: true });
+    if (cellCountError) throw cellCountError;
+
+    const reportPageSize = 1000;
+    const reportPageCount = Math.ceil((cellCount || 0) / reportPageSize);
+    const reportCellPages = await Promise.all(Array.from({ length: reportPageCount }, (_, page) =>
+      supabase
+        .from('cells')
+        .select(reportCellFields)
+        .order('created_at', { ascending: false })
+        .range(page * reportPageSize, (page + 1) * reportPageSize - 1),
+    ));
+    const failedCellPage = reportCellPages.find(result => result.error);
+    if (failedCellPage?.error) throw failedCellPage.error;
+    const cells = reportCellPages.flatMap(result => result.data || []) as CellItem[];
+
+    const [batteriesResult, modulesResult, bmsResult, cellTestsResult, batteryTestsResult, quarantineResult] = await Promise.all([
       supabase.from('batteries').select('id,status,step_results_json,created_at'),
       supabase.from('modules').select('id,status,welding_result_json'),
       supabase.from('bms_units').select('id,status,test_result_json'),
@@ -523,6 +541,19 @@ async getUsers(): Promise<User[]> {
       quarantineOpen: quarantine.filter(record => record.status === 'OPEN').length,
       quarantineResolved: quarantine.filter(record => record.status === 'RESOLVED').length,
     };
+  },
+
+  async getRecentTraceItems(): Promise<Array<{ label: string; serial: string }>> {
+    const [batteriesResult, cellsResult] = await Promise.all([
+      supabase.from('batteries').select('serial_number').order('created_at', { ascending: false }).limit(3),
+      supabase.from('cells').select('internal_serial').order('created_at', { ascending: false }).limit(3),
+    ]);
+    if (batteriesResult.error) throw batteriesResult.error;
+    if (cellsResult.error) throw cellsResult.error;
+    return [
+      ...(batteriesResult.data || []).map((battery: any) => ({ label: `${battery.serialNumber} (Battery)`, serial: battery.serialNumber })),
+      ...(cellsResult.data || []).map((cell: any) => ({ label: `${cell.internalSerial} (Cell)`, serial: cell.internalSerial })),
+    ].filter(item => Boolean(item.serial));
   },
 
   // Products

@@ -44,10 +44,15 @@ export const DashboardView: React.FC = () => {
     };
     setLoading(true);
     void refresh();
-    const interval = window.setInterval(refresh, 15000);
+    const refreshWhenVisible = () => {
+      if (!document.hidden) void refresh();
+    };
+    const interval = window.setInterval(refreshWhenVisible, 60000);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
     };
   }, [refreshKey]);
 

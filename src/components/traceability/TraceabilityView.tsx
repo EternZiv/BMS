@@ -21,6 +21,7 @@ import {
   Package,
   Factory,
   ScanLine,
+  Download,
 } from 'lucide-react';
 
 interface TraceNode {
@@ -288,6 +289,20 @@ function detailFields(node: TraceNode): { label: string; value: string }[] {
   }
 }
 
+function csvValue(value: unknown): string {
+  return `"${String(value ?? '').replace(/"/g, '""')}"`;
+}
+
+function flattenTraceNodes(nodes: TraceNode[], parent = ''): string[][] {
+  return nodes.flatMap(node => {
+    const details = detailFields(node)
+      .map(field => `${field.label}: ${field.value}`)
+      .join('; ');
+    const row = [node.type, node.title, parent, node.subtitle || '', node.badge || '', details];
+    return [row, ...flattenTraceNodes(node.children || [], node.title)];
+  });
+}
+
 const TreeNode: React.FC<{
   node: TraceNode;
   selectedKey: string;
@@ -347,11 +362,7 @@ export const TraceabilityView: React.FC = () => {
 
   const loadRecentSerials = async () => {
     try {
-      const [bats, cells] = await Promise.all([api.getBatteries(), api.getCells({ limit: 5 })]);
-      const list: { label: string; serial: string }[] = [];
-      bats.slice(0, 3).forEach((b: any) => list.push({ label: `${b.serialNumber} (Battery)`, serial: b.serialNumber }));
-      cells.slice(0, 3).forEach((c: any) => list.push({ label: `${c.internalSerial} (Cell)`, serial: c.internalSerial }));
-      setRecentSerials(list);
+      setRecentSerials(await api.getRecentTraceItems());
     } catch {
       /* ignore */
     }
@@ -373,6 +384,23 @@ export const TraceabilityView: React.FC = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const exportTraceReport = () => {
+    if (!trace || tree.length === 0) return;
+
+    const header = ['Type', 'Identifier', 'Parent', 'Relationship', 'Status', 'Details'];
+    const rows = flattenTraceNodes(tree).map(row => [row[0], row[1], row[2], row[3], row[4], row[5]]);
+    const csv = [header, ...rows].map(row => row.map(csvValue).join(',')).join('\r\n');
+    const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const identifier = String(trace.identifier || trace.entity?.serialNumber || trace.entity?.id || 'trace')
+      .replace(/[^a-z0-9_-]+/gi, '_');
+    link.href = url;
+    link.download = `${identifier}_trace_report.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
   };
 
   const tree = trace ? buildTree(trace) : [];
@@ -471,6 +499,15 @@ export const TraceabilityView: React.FC = () => {
                 <p><span className="text-slate-400">Status:</span> <strong className="text-white">{trace.status}</strong></p>
               </div>
             </div>
+            <button
+              type="button"
+              onClick={exportTraceReport}
+              className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-emerald-400/40 bg-emerald-500/15 px-3.5 py-2.5 text-xs font-bold text-emerald-200 transition-colors hover:bg-emerald-500/25"
+              title="Download genealogy report"
+            >
+              <Download className="w-4 h-4" />
+              <span>Export Trace CSV</span>
+            </button>
           </div>
 
           {/* Tree + Detail */}

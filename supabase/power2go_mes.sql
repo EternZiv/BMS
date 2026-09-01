@@ -106,6 +106,15 @@ begin
 end;
 $$ language plpgsql security definer;
 
+create or replace function public.require_permission(required_permission text)
+returns void as $$
+begin
+    if auth.uid() is null or not public.has_permission(required_permission) then
+        raise exception 'Permission denied: %', required_permission using errcode = '42501';
+    end if;
+end;
+$$ language plpgsql security definer set search_path = public;
+
 create or replace function public.email_for_username(p_username text)
 returns text as $$
 declare
@@ -609,6 +618,7 @@ declare
     v_qr_code text;
     v_internal text;
 begin
+    perform public.require_permission('MANAGE_INVENTORY');
     -- 1. Resolve/Create Supplier
     select id into v_supplier_id from public.suppliers where name = p_supplier_name;
     if v_supplier_id is null then
@@ -728,6 +738,7 @@ create or replace function public.archive_controller_transaction(
     p_controller_id text
 ) returns void as $$
 begin
+    perform public.require_permission('MANAGE_INVENTORY');
     if p_controller_type = 'BMS' then
         update public.bms_units set status = 'ARCHIVED' where id = p_controller_id;
     elsif p_controller_type = 'BMU' then
@@ -746,6 +757,7 @@ create or replace function public.delete_controller_transaction(
     p_controller_id text
 ) returns void as $$
 begin
+    perform public.require_permission('MANAGE_INVENTORY');
     if p_controller_type = 'BMS' then
         update public.batteries set bms_id = null where bms_id = p_controller_id;
         delete from public.qr_registry where entity_type = 'BMS' and entity_id = p_controller_id;
@@ -777,6 +789,7 @@ create or replace function public.delete_battery_cascade(
 declare
     v_order_id text;
 begin
+    perform public.require_permission('MANAGE_PRODUCTION');
     if p_battery_id is null or p_battery_id = '' then
         raise exception 'Battery id is required';
     end if;
@@ -863,6 +876,7 @@ declare
     j integer;
     v_cell_slice_ids text[];
 begin
+    perform public.require_permission('MANAGE_ORDERS');
     select serial_prefix, product_model, battery_name, voltage_type, capacity_kwh, num_modules, cells_per_module, total_cells
     into v_serial_prefix, v_product_model, v_battery_name, v_voltage_type, v_capacity_kwh, v_num_modules, v_cells_per_module, v_total_cells_per_battery
     from public.product_templates
@@ -1011,6 +1025,7 @@ declare
     v_bmu_record record;
     v_battery_record record;
 begin
+    perform public.require_permission('MANAGE_PRODUCTION');
     select * into v_battery_record from public.batteries where id = p_battery_id for update;
     if not found then
         raise exception 'Battery % not found', p_battery_id;
@@ -1111,6 +1126,7 @@ create or replace function public.replace_controller_transaction(
 declare
     v_old_id text;
 begin
+    perform public.require_permission('MANAGE_PRODUCTION');
     select case when p_controller_type = 'BMS' then bms_id else bmu_id end
     into v_old_id
     from public.batteries
@@ -1150,6 +1166,7 @@ declare
     v_target_module_id text;
     v_target_slot integer;
 begin
+    perform public.require_permission('MANAGE_PRODUCTION');
     if p_target_module_id is null then
         raise exception 'Target module is required';
     end if;
@@ -1329,6 +1346,7 @@ declare
     v_qc_ok boolean;
     v_notes text;
 begin
+    perform public.require_permission('MANAGE_PRODUCTION');
     for v_mod in select * from jsonb_to_recordset(p_modules) as x(module_id text, status text, welding_status text, physical_visual_ok boolean, voltage_qc_ok boolean, notes text) loop
         v_module_id := v_mod.module_id;
         v_status := v_mod.status;
@@ -1405,6 +1423,7 @@ declare
     v_controller_id text;
     v_passed boolean;
 begin
+    perform public.require_permission('MANAGE_PRODUCTION');
     v_passed := (p_result->>'status' = 'PASSED');
     
     if p_controller_type = 'BMS' then
@@ -1450,6 +1469,7 @@ declare
     v_battery record;
     v_passed boolean;
 begin
+    perform public.require_permission('MANAGE_PRODUCTION');
     v_passed := coalesce((p_result->>'qcTesting' <> 'FAILED'), true);
 
     insert into public.battery_tests (id, battery_id, test_type, passed, result_json, tested_by, tested_at)
@@ -1485,6 +1505,7 @@ declare
     v_quarantine_record record;
     v_quarantine_id text;
 begin
+    perform public.require_permission('MANAGE_PRODUCTION');
     v_quarantine_id := 'quar-' || extract(epoch from now())::bigint::text;
 
     insert into public.quarantine_records (id, entity_type, entity_id, reason, status, quarantined_by, quarantined_at)
@@ -1524,6 +1545,7 @@ declare
     v_passed_module_tests integer;
     v_battery_tests_passed boolean;
 begin
+    perform public.require_permission('MANAGE_PRODUCTION');
     select * into v_battery from public.batteries where id = p_battery_id for update;
     if v_battery.status = 'RELEASED' or v_battery.status = 'FINISHED' then
         raise exception 'Battery has already been released';
@@ -1598,6 +1620,7 @@ create or replace function public.resolve_quarantine_transaction(
 declare
     v_quarantine_record record;
 begin
+    perform public.require_permission('MANAGE_PRODUCTION');
     select * into v_quarantine_record from public.quarantine_records where id = p_quarantine_id for update;
     if not found then
         raise exception 'Quarantine record % not found', p_quarantine_id;
@@ -1647,6 +1670,7 @@ create or replace function public.dispatch_battery_transaction(
 declare
     v_battery record;
 begin
+    perform public.require_permission('MANAGE_PRODUCTION');
     select * into v_battery from public.batteries where id = p_battery_id;
     if not found then
         raise exception 'Battery % not found', p_battery_id;
@@ -1685,6 +1709,7 @@ create or replace function public.receive_battery_transaction(
 declare
     v_battery record;
 begin
+    perform public.require_permission('MANAGE_PRODUCTION');
     select * into v_battery from public.batteries where id = p_battery_id;
     if not found then
         raise exception 'Battery % not found', p_battery_id;
@@ -1725,6 +1750,7 @@ declare
     v_battery record;
     v_module record;
 begin
+    perform public.require_permission('MANAGE_PRODUCTION');
     select * into v_battery from public.batteries where id = p_battery_id for update;
     if not found then
         raise exception 'Battery % not found', p_battery_id;
@@ -1799,6 +1825,7 @@ declare
     v_avg_score numeric := 85.0;
     idx integer;
 begin
+    perform public.require_permission('MANAGE_PRODUCTION');
     select * into v_battery from public.batteries where id = p_battery_id for update;
     if not found then
         raise exception 'Battery % not found', p_battery_id;
@@ -1897,6 +1924,7 @@ create or replace function public.delete_module_transaction(
     p_module_id text
 ) returns void as $$
 begin
+    perform public.require_permission('MANAGE_PRODUCTION');
     update public.cells
     set status = 'AVAILABLE',
         reserved_for_battery_id = null,
@@ -1916,6 +1944,7 @@ create or replace function public.cancel_production_order_transaction(
     p_user_id text
 ) returns void as $$
 begin
+    perform public.require_permission('MANAGE_ORDERS');
     update public.production_orders
     set status = 'CANCELLED',
         updated_at = now()
