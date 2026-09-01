@@ -1742,10 +1742,37 @@ async getUsers(): Promise<User[]> {
 
     if (data.slotType === 'BMS') {
       if (!rawSupabase) throw new Error('Supabase is not configured.');
+      const lookupValue = data.barcode.trim();
+      const { data: bmsById, error: bmsIdLookupError } = await supabase
+        .from('bms_units')
+        .select('id, serialNumber, status, reservedForBatteryId')
+        .eq('id', lookupValue)
+        .maybeSingle();
+      if (bmsIdLookupError) throw bmsIdLookupError;
+      let bmsRecord = bmsById;
+      if (!bmsRecord) {
+        const { data: bmsBySerial, error: bmsSerialLookupError } = await supabase
+          .from('bms_units')
+          .select('id, serialNumber, status, reservedForBatteryId')
+          .ilike('serialNumber', lookupValue)
+          .maybeSingle();
+        if (bmsSerialLookupError) throw bmsSerialLookupError;
+        bmsRecord = bmsBySerial;
+      }
+      if (!bmsRecord) {
+        throw new Error(`BMS '${lookupValue}' was not found in the current BMS inventory.`);
+      }
+      if (bmsRecord.status === 'QUARANTINED' || bmsRecord.status === 'FAILED' || bmsRecord.status === 'ARCHIVED') {
+        throw new Error(`BMS '${bmsRecord.serialNumber}' is not available for assignment (${bmsRecord.status}).`);
+      }
+      const bmsAssignedBatteryId = bmsRecord.assignedToBatteryId || bmsRecord.reservedForBatteryId;
+      if (bmsAssignedBatteryId && bmsAssignedBatteryId !== batteryId) {
+        throw new Error(`BMS '${bmsRecord.serialNumber}' is already assigned to another battery.`);
+      }
       const { data: result, error } = await rawSupabase.rpc('assign_controller_transaction', {
         p_battery_id: batteryId,
         p_controller_type: 'BMS',
-        p_controller_id: data.barcode,
+        p_controller_id: bmsRecord.id,
         p_metadata: { manufacturer: data.manufacturer, batchNumber: data.batchNumber },
       });
       if (error) throw error;
@@ -1810,10 +1837,37 @@ async getUsers(): Promise<User[]> {
 
     if (data.slotType === 'BMU') {
       if (!rawSupabase) throw new Error('Supabase is not configured.');
+      const lookupValue = data.barcode.trim();
+      const { data: bmuById, error: bmuIdLookupError } = await supabase
+        .from('bmu_units')
+        .select('id, serialNumber, status, reservedForBatteryId')
+        .eq('id', lookupValue)
+        .maybeSingle();
+      if (bmuIdLookupError) throw bmuIdLookupError;
+      let bmuRecord = bmuById;
+      if (!bmuRecord) {
+        const { data: bmuBySerial, error: bmuSerialLookupError } = await supabase
+          .from('bmu_units')
+          .select('id, serialNumber, status, reservedForBatteryId')
+          .ilike('serialNumber', lookupValue)
+          .maybeSingle();
+        if (bmuSerialLookupError) throw bmuSerialLookupError;
+        bmuRecord = bmuBySerial;
+      }
+      if (!bmuRecord) {
+        throw new Error(`BMU '${lookupValue}' was not found in the current BMU inventory.`);
+      }
+      if (bmuRecord.status === 'QUARANTINED' || bmuRecord.status === 'FAILED' || bmuRecord.status === 'ARCHIVED') {
+        throw new Error(`BMU '${bmuRecord.serialNumber}' is not available for assignment (${bmuRecord.status}).`);
+      }
+      const bmuAssignedBatteryId = bmuRecord.assignedToBatteryId || bmuRecord.reservedForBatteryId;
+      if (bmuAssignedBatteryId && bmuAssignedBatteryId !== batteryId) {
+        throw new Error(`BMU '${bmuRecord.serialNumber}' is already assigned to another battery.`);
+      }
       const { data: result, error } = await rawSupabase.rpc('assign_controller_transaction', {
         p_battery_id: batteryId,
         p_controller_type: 'BMU',
-        p_controller_id: data.barcode,
+        p_controller_id: bmuRecord.id,
         p_metadata: { manufacturer: data.manufacturer, batchNumber: data.batchNumber },
       });
       if (error) throw error;

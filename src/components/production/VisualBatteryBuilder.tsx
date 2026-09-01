@@ -103,7 +103,7 @@ export const VisualBatteryBuilder: React.FC = () => {
     if (!data) return;
 
     const { battery, product } = data;
-    if (!battery.bms && !battery.bmu) {
+    if (!battery.bms && product.bmsConfig?.required) {
       setScannerMode(mode);
       setComponentType('BMS');
       setManufacturer('');
@@ -128,8 +128,9 @@ export const VisualBatteryBuilder: React.FC = () => {
     if (!data || !userId) return;
     setActionLoading(true);
     try {
+      const normalizedCode = code.trim();
       const scanPayload = {
-        barcode: code,
+        barcode: normalizedCode,
         slotType,
         moduleIndex: scannerTarget.moduleIndex,
         cellSlotIndex: scannerTarget.cellSlotIndex,
@@ -138,7 +139,7 @@ export const VisualBatteryBuilder: React.FC = () => {
         batchNumber: componentMetadata.batchNumber,
       } as const;
       if (assignedController && (slotType === 'BMS' || slotType === 'BMU')) {
-        await api.replaceController(data.battery.id, slotType, code, userId);
+        await api.replaceController(data.battery.id, slotType, normalizedCode, userId);
       } else {
         await api.scanComponent(data.battery.id, scanPayload);
       }

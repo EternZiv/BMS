@@ -1033,7 +1033,9 @@ begin
 
     if p_controller_type = 'BMS' then
         select * into v_bms_record from public.bms_units
-        where id = p_controller_id or serial_number = p_controller_id for update;
+          where id = trim(p_controller_id)
+              or lower(trim(serial_number)) = lower(trim(p_controller_id))
+          for update;
 
         if not found then
             raise exception 'BMS % not found', p_controller_id;
@@ -1072,7 +1074,9 @@ begin
 
     elsif p_controller_type = 'BMU' then
         select * into v_bmu_record from public.bmu_units
-        where id = p_controller_id or serial_number = p_controller_id for update;
+          where id = trim(p_controller_id)
+              or lower(trim(serial_number)) = lower(trim(p_controller_id))
+          for update;
 
         if not found then
             raise exception 'BMU % not found', p_controller_id;
